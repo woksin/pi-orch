@@ -10,28 +10,38 @@ Set these **before launching** pi/pi-session; wrapper relaunches retain them:
 
 | Variable | Meaning |
 |---|---|
-| `PI_ORCH_ID` | `L0`, `R-<Repo>` owner, or lane (e.g. `L3`). Overrides live assignment when set; otherwise discovered sessions can be enrolled live. |
-| `PI_ORCH_OPTOUT` | `1` keeps the extension fully dormant, even under a configured root. |
+| `PI_ORCH_ID` | `L0`, `R-<Repo>` owner, or lane (e.g. `L3`). Bootstrap ID only when no matching bound assignment/tombstone exists. Enrolment is authoritative. |
+| `PI_ORCH_OPTOUT` | `1` disables discovery/delivery; it cannot disable an explicit or previously bound lane guard. |
 | `PI_REPO` | Repo key for owners/lanes, e.g. `Studio`. |
 | `ORCH_HOME` | Defaults to `/Volumes/sourcecode/repos/cratis/.ai-work/orch`. Tests always use a temporary home. |
 | `ORCH_NODE` | Optional executable override for bin scripts; default is the pilot's Node 26.8.1 absolute path. |
 | `PI_SESSION_WRAPPER_PID` | pi-session wrapper PID: stable session key `w<PID>`; otherwise `p<host-pid>`. |
 
 Activation requires cwd under a `config.json` root, not under an exclude, and no
-opt-out. This also applies to explicit PI_ORCH_ID. No config/roots means dormant.
+opt-out. No config/roots means no discovery/delivery. Explicit lane guards still apply outside roots, under excludes/optout and without config. Malformed config is dormant and reported once, not thrown from load/tool handlers.
 The session-start observer re-evaluates roots on new/resume, and re-pins every UI
-session ID. Outside roots: no registrations, deliveries, tools or blocking guards.
+session ID. Outside roots: no registrations, deliveries or tools; explicit/bound guards remain. Pending or mismatched identities never receive owner privileges.
 In-process workers (`ctx.hasUI === false`) never write session/heartbeat files or
 deliver messages; assigned workers still cannot publish. This is an accidental-
 publication barrier, **not a sandbox**; existing extensions may block independently.
 
-Active sessions register by stable key, with tty, canonical cwd/git toplevel,
-origin slug, branch, current session ID, host and wrapper PID. Effective identity:
-env PI_ORCH_ID, else `assignments/<key>.json`, else `S-<key>` (unassigned). The bus
+Active sessions register immediately with no process probes on session_start.
+Metadata fills via deferred async execFile calls, coalesced/cached for 30s; obsolete
+new/resume/shutdown completions are discarded. Metadata adds tty, canonical git
+root, origin, branch, and OS host/wrapper start times. Assignments bind to
+`{pid,start}` of the wrapper (or host without one), not the reusable numeric key.
+/new and same-wrapper host relaunch retain the binding; PID reuse ignores the old
+assignment and its stable-key messages. Old assignments without bindings require
+re-enrolment. A missing process identity stays pending, not privileged.
+
+Effective identity: matching bound assignment/tombstone, else validated env
+bootstrap, else `S-<key>`. Roles must agree with IDs: `R-<Repo>` = owner of that
+repo, `L0` = l0, all others = lane. Duplicate IDs held by live bound processes are
+refused, including env owner startup. The bus
 watches assignments and reads them at each tool call; no restart/env mutation is
 needed. Both effective-id and stable-key inboxes are read. Unassigned sessions
 receive only ALL broadcasts and addressed orders, with **no publication/watch
-guards** except the configured phaseWindow. Assignment starts lane/owner guards.
+guards** except the configured phaseWindow. Assignment starts lane/owner guards. The five tools and status line are activated only for assigned sessions or sessions with an addressed message; active-tool updates hide them from other prompts, preserving unrelated tools.
 
 The bus scans at session start/agent_end, watches inboxes/assignments, polls every
 20s and heartbeats every 30s. followUp delivery starts an idle turn or queues while
@@ -48,12 +58,12 @@ Shutdown closes watchers/timers and removes only the session's own heartbeat.
 Tools: `order_ack {id,plan}`, `order_decline {id,reason}`,
 `order_done {id,evidence}`, `orch_send {to,kind,subject,body,requiresAck?,deadlineMin?}`,
 `orch_status {repo?}`. Send recipients: session ID, `ALL`, `owners`, `lanes` (groups
-use registered sessions). Default acknowledgment false, deadline 30 minutes.
+use fresh, rooted, instrumented sessions). Default acknowledgment false, deadline 30 minutes.
 
 Lane/worker bash and job command/check fields deny git push, gh pr
-create/merge/ready/close, gh release, gh workflow run, and orch cand push/land/rebuild. Owner holds deny only their
+create/merge/ready/close, gh release, gh workflow run, and orch cand push/land/rebuild and orch enrol/unenrol. Owner holds deny only their
 listed push/pr-create/pr-merge operations. Everyone must use orch_status instead
-of gh run watch / gh pr checks --watch. CLI push/land/rebuild enforce the same role/hold checks using env or wrapper/registered-ancestor assignment. Standalone/unassigned callers retain operator access. gh api writes remain advisory/unparsed; this is not credential isolation. The role note is sent once per session/role revision, never each turn or in workers.
+of gh run watch / gh pr checks --watch. CLI push/land/rebuild enforce the same role/hold checks using verified wrapper/registered ancestry before considering env. A lane cannot change its own authority by setting PI_ORCH_ID=L0, changing wrapper env, opting out, or calling enrol/unenrol. Standalone/unassigned callers retain operator access. gh api writes remain advisory/unparsed; this is not credential isolation. The role note is sent once per session/role revision, never each turn or in workers.
 
 ## ORCH_HOME
 
@@ -91,8 +101,8 @@ realpaths, including symlinks and macOS /var vs /private/var aliases.
 }
 ```
 
-- `assignments/<key>.json`: `{key,id,role,repo,assignedAt,by,rev}`, written by enrol, removed by unenrol.
-- `sessions/<key>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt.
+- `assignments/<key>.json`: `{key,id,role,repo,assignedAt,by,rev,binding:{pid,start}}`. Enrol writes a validated assignment; unenrol writes a bound null-role tombstone so the old env role cannot reappear.
+- `sessions/<key>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt, hostStart and processIdentity.
 - `heartbeats/<key>.json`: overwritten liveness/state, last turn end, unacked IDs.
 - `inbox/<id>/<msgId>.json`: immutable message; ID `yyyymmddThhmmss-from-xxxx`.
 - `receipts/<id>/<msgId>.<state>.json`: immutable delivered/acked/declined/done/reminded/escalated transitions.
@@ -121,7 +131,7 @@ Exit codes: **0** success, **1** usage, **2** named precondition failed,
 
 ```sh
 orch send R-Studio --kind order --subject 'Next batch' --ack --deadline 30 --body-file order.txt
-# Without --body-file, body comes from stdin. Sender PI_ORCH_ID, or operator L0.
+# Without --body-file, body comes from stdin. Sender is effective identity, or outside operator L0.
 orch send R-Studio --kind hold --subject 'Pause' --repo Studio --blocks push,pr-merge --body-file hold.txt
 # release uses same repo and blocks. Kinds: order/info/question/report/idle/rule/hold/release/ci/escalation.
 orch sessions [--json] [--all]
@@ -197,13 +207,11 @@ push does. Already superseded candidates cannot be rebuilt again, and in-cand de
 
 Live enrolment: `sessions` lists registrations; `--all` also reads uninstrumented
 pi processes via pgrep/ps/lsof cwd, and attaches cached open PRs matching branches.
-Discovery is injectable for tests. Uninstrumented processes can be assigned, but
-cannot deliver until this extension is actually installed and active. `enrol`
+Discovery is injectable for tests. Only live processes under roots/outside excludes are listed. Dead or identity-mismatched registrations are pruned; stale heartbeats are excluded from broadcasts and tty matching. Uninstrumented processes under roots are marked explicitly by --all; enrol refuses them until the extension has registered a verified process identity. `enrol`
 writes the assignment and an ack-required rules message to the stable-key inbox;
-`unenrol` returns to S-<key>. Env-pinned identities cannot be overridden this way.
+`unenrol` writes a bound tombstone and returns to S-<key>, suppressing even a previous env role. Enrol/unenrol require effective L0, or a standalone operator outside registered session ancestry who is managing a different session. Owners, lanes and unassigned in-session callers cannot administer enrolment. Discovery happens before taking the assignment lease; bounded CLI probes renew leases.
 `owners` shows live repo owners, session IDs and heartbeat ages. A live owner has a
-heartbeat <=90s old and a live host OR wrapper PID. Two live owners for one repo
-are refused: demote/unenrol the old owner before promoting its replacement.
+heartbeat <=90s old and a verified live process start identity. An assignment reserves its ID while that process/wrapper remains alive even with a stale heartbeat, so a slow relaunch cannot create two owners: use L0/outside operator to demote/unenrol the old owner before promoting its replacement.
 
 Each 120s tick performs one open-PR list per enrolled repo, plus one view for a
 candidate PR newly missing from the open list. Cache CI transitions SUCCESS,
