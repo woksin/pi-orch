@@ -83,11 +83,23 @@ export function commands(text: string): string[][] {
   });
 }
 function operation(words: string[]): string | undefined {
-  let i = words.findIndex(w => /^(?:.*\/)?(?:git|gh)$/.test(w));
-  if (i < 0) return;
-  // A binary name in echo/printf prose is not executable.
-  if (i > 0 && !words.slice(0, i).every(w => /^(?:env|command|exec|sudo|nohup|time|[A-Za-z_][\w]*=.*|-[\w-]+)$/.test(w))) return;
-  const binary = words[i++].split('/').at(-1);
+  let i = 0;
+  while (i < words.length) {
+    const word = words[i], name = word.split('/').at(-1);
+    if (/^[A-Za-z_][\w]*=/.test(word)) { i++; continue; }
+    if (['env', 'sudo', 'command', 'exec', 'nohup', 'time', 'timeout'].includes(name!)) {
+      i++;
+      while (words[i]?.startsWith('-')) {
+        const flag = words[i++];
+        if (['-u', '--unset', '-C', '--chdir', '-g', '--group', '--user', '-s', '--signal', '-k', '--kill-after'].includes(flag)) i++;
+      }
+      if (name === 'timeout') i++;
+      continue;
+    }
+    break;
+  }
+  const binary = words[i++]?.split('/').at(-1);
+  if (!['git', 'gh'].includes(binary!)) return;
   while (words[i]?.startsWith('-')) {
     const flag = words[i++];
     if (['-C', '-c', '--git-dir', '--work-tree', '--repo', '-R', '--hostname'].includes(flag)) i++;

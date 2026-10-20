@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { atomic, now, readJson } from '../src/lib/store.ts';
@@ -15,7 +17,9 @@ test('poller transitions + closed PR view + escalation + stale digest + rate bac
   const f = fixture(); try {
     const s = f.store, time = Date.now();
     s.saveCandidate({ name: 'Test-poll', repo: 'Test', branch: 'cand/Test-poll', base: 'base', headSha: 'head', createdAt: now(), members: [], bounced: [], express: false, pr: 10 });
-    const release = acquirePollLock(s); assert.throws(() => acquirePollLock(s), /EEXIST/); release(); const again = acquirePollLock(s); again();
+    const release = acquirePollLock(s); assert.throws(() => acquirePollLock(s), /EEXIST/);
+    const child = spawnSync(process.execPath, [fileURLToPath(new URL('../src/cli/poll.ts', import.meta.url)), '--once'], { env: { ...process.env, ORCH_HOME: s.home }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.status, 2); assert.match(child.stderr, /single instance/); release(); const again = acquirePollLock(s); again();
     const pr = { number: 10, headRefName: 'cand/Test-poll', headRefOid: 'head', statusCheckRollup: [{ conclusion: 'SUCCESS' }] };
     writeFileSync(f.ghData, JSON.stringify({ list: [pr] })); assert.deepEqual(pollOnce(s, time).errors, []);
     assert.equal(s.messages('R-Test').filter(m => m.kind === 'ci').length, 1); pollOnce(s, time + 120000); assert.equal(s.messages('R-Test').length, 1);

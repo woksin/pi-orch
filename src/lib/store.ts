@@ -11,7 +11,7 @@ export interface Repo { slug: string; mainCheckout: string; integrationWorktree:
 export interface Note { section: string; bullets: string[] }
 export interface Delivery { id: string; repo: string; issue: number; branch: string; sha: string; author: string; createdAt: string; deps: string[]; gateLog: string; notes: Note[]; intent: string; paths?: string[] }
 export interface DeliveryStatus { state: string; at: string; cand?: string; pr?: number; reason?: string }
-export interface Candidate { name: string; repo: string; base: string; branch: string; createdAt: string; members: string[]; bounced: { dId: string; reason: string }[]; express: boolean; headSha: string; gateLog?: string; gateSha?: string; pr?: number; landedAt?: string }
+export interface Candidate { name: string; repo: string; base: string; branch: string; createdAt: string; members: string[]; bounced: { dId: string; reason: string }[]; express: boolean; headSha: string; gateLog?: string; gateSha?: string; pr?: number; landedAt?: string; supersededBy?: string }
 export const role = (id: string): Kind => id === 'L0' ? 'l0' : id.startsWith('R-') ? 'owner' : 'lane';
 export const now = () => new Date().toISOString();
 export function key(value: string): string {
@@ -55,7 +55,7 @@ export class Store {
   repo(name: string): Repo { const r = this.repos()[key(name)]; if (!r) throw new Error(`repo not configured: ${name}`); return r; }
   list<T>(...parts: string[]): T[] { return files(this.path(...parts)).map(f => readJson<T>(this.path(...parts, f))); }
   messages(id: string): Message[] { return this.list<Message>('inbox', key(id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)); }
-  receipt(id: string, msgId: string, state: string): Receipt | undefined { return readJson<Receipt | undefined>(this.path('receipts', key(id), `${key(msgId)}.${key(state)}.json`), undefined as any); }
+  receipt(id: string, msgId: string, state: string): Receipt | undefined { const file = this.path('receipts', key(id), `${key(msgId)}.${key(state)}.json`); return existsSync(file) ? readJson(file) : undefined; }
   has(id: string, msgId: string, state: string): boolean { return existsSync(this.path('receipts', key(id), `${key(msgId)}.${key(state)}.json`)); }
   record(id: string, msgId: string, state: string, extra: Partial<Receipt> = {}) {
     return atomic(this.path('receipts', key(id), `${key(msgId)}.${key(state)}.json`), { ...extra, msgId, state, at: now(), by: id }, true);

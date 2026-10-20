@@ -23,7 +23,7 @@ test('lane-bus delivery formatting, receipts, reminder and L0 digest decisions',
 });
 
 test('guard decisions: workers, owners, holds/releases, watches, unrelated commands', () => {
-  for (const cmd of ['git push', 'git -C /tmp/x push origin topic', 'gh pr create', 'gh pr merge 2', 'gh pr ready', 'gh pr close', 'gh release create v1', 'gh workflow run x', 'bash -lc "git push"', 'true && gh pr create']) assert.match(guard(cmd, 'lane', true, 'Test', [])!, /deliver to R-Test/);
+  for (const cmd of ['git push', 'git -C /tmp/x push origin topic', 'gh pr create', 'gh pr merge 2', 'gh pr ready', 'gh pr close', 'gh release create v1', 'gh workflow run x', 'bash -lc "git push"', 'true && gh pr create', 'env -u GH_TOKEN git push', 'timeout 30 gh pr merge 2', 'env FOO=x /usr/bin/git -C/tmp push', 'echo "$(git push)"']) assert.match(guard(cmd, 'lane', true, 'Test', [])!, /deliver to R-Test/);
   for (const cmd of ['gh run watch 1', 'gh pr checks 2 --watch', "bash -c 'gh run watch 1'"]) assert.match(guard(cmd, 'l0', true, 'Test', [])!, /orch_status/);
   assert.ok(guard('git push', 'owner', false, 'Test', []));
   assert.ok(guard('git push', 'owner', true, 'Test', ['push']));
@@ -50,6 +50,9 @@ test('throwaway fake-pi loader: dormant, active registrations, delivery, passive
     handlers.get('session_start')({}, child); assert.equal(sent.length, 1);
     assert.ok(handlers.get('tool_call')({ toolName: 'bash', input: { command: 'git push' } }, child).block);
     assert.equal(handlers.get('tool_call')({ toolName: 'order_ack', input: {} }, child), undefined);
+    assert.ok(handlers.get('tool_call')({ toolName: 'job_start', input: { command: 'git push' } }, child).block);
+    assert.ok(handlers.get('tool_call')({ toolName: 'job_watch', input: { check: 'gh pr checks 1 --watch' } }, child).block);
+    assert.equal(s.list('heartbeats').length, 1); assert.equal(s.list<any>('heartbeats')[0].sessionId, 'main');
     const root = mkdtempSync(join(tmpdir(), 'orch-context-')); atomic(join(root, 'main.json'), { phase: 'handoff-required' }); assert.ok(handoffActive('main', root)); assert.equal(handoffActive('absent', root), false);
   } finally {
     handlers.get('session_shutdown')?.(); (globalThis as any)[symbol] = primary;

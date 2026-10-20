@@ -97,3 +97,35 @@ test('CLI exit codes: usage, precondition, partial, nothing and success', () => 
     assert.equal(main(['cand', 'build', '--repo', 'Test', '--ids', `${a.id},${b.id}`], f.store), 3); assert.equal(main(['board', '--json'], f.store), 0);
   } finally { f.restore(); }
 });
+
+test('build dependency precondition and express quota use separate locked worktree', () => {
+  const f = fixture(); try {
+    const a = f.delivery('a'), b = f.delivery('b', 'b', 'b', [a.id]);
+    assert.throws(() => build(f.store, 'Test', [b.id]), /dependency closure/);
+    const first = build(f.store, 'Test', [a.id], true); assert.ok(first.express);
+    assert.match(git(`${f.integration}-express`, 'branch', '--show-current'), /^cand\//);
+    build(f.store, 'Test', [a.id, b.id], true);
+    assert.throws(() => build(f.store, 'Test', [a.id], true), /expressPerDay/);
+  } finally { f.restore(); }
+});
+
+test('reconcile repairs interrupted PR recording and closed status, without duplicate events', () => {
+  const f = fixture(); try {
+    const a = f.delivery('a'), c = build(f.store, 'Test', [a.id]);
+    writeFileSync(f.ghData, JSON.stringify({ list: [{ number: 10, state: 'OPEN', headRefOid: c.headSha }] }));
+    reconcile(f.store, 'Test'); assert.equal(f.store.candidate('Test', c.name).pr, 10); assert.equal(f.store.status('Test', a.id)?.state, 'in-cand');
+    writeFileSync(f.ghData, JSON.stringify({ view: { number: 10, state: 'CLOSED', headRefOid: c.headSha } }));
+    reconcile(f.store, 'Test'); assert.equal(f.store.status('Test', a.id)?.state, 'pending');
+    const count = f.store.list('deliveries', 'Test').length; reconcile(f.store, 'Test'); assert.equal(f.store.list('deliveries', 'Test').length, count);
+  } finally { f.restore(); }
+});
+
+test('push refuses a changed branch head until sync and a new gate', () => {
+  const f = fixture(); try {
+    const a = f.delivery('a'), c = build(f.store, 'Test', [a.id]); gate(f.store, 'Test', c.name, f.gateLog);
+    writeFileSync(join(f.integration, 'owner'), 'fix'); git(f.integration, 'add', 'owner'); git(f.integration, 'commit', '-m', 'owner fix');
+    assert.throws(() => push(f.store, 'Test', c.name), /branch head/);
+    sync(f.store, 'Test', c.name); assert.throws(() => push(f.store, 'Test', c.name), /gate evidence/);
+    gate(f.store, 'Test', c.name, f.gateLog); assert.equal(push(f.store, 'Test', c.name).pr, 10);
+  } finally { f.restore(); }
+});

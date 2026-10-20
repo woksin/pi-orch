@@ -48,10 +48,11 @@ function assertHead(r: Repo, c: Candidate) {
   if (git(cwd, 'branch', '--show-current') !== c.branch || git(cwd, 'rev-parse', 'HEAD') !== c.headSha) throw new OrchError('branch head != headSha; run orch cand sync');
   clean(cwd); return cwd;
 }
-export function build(store: Store, repo: string, ids: string[], express = false): Candidate {
+export function build(store: Store, repo: string, ids: string[], express = false, replacing?: string): Candidate {
   const r = store.repo(repo), all = store.deliveries(repo), previous = store.candidates(repo);
+  const cache = readJson<any>(store.path('gh', `${repo}.json`), { prs: [] });
   if (!ids.length || new Set(ids).size !== ids.length) throw new OrchError('ids must be nonempty and unique');
-  if (!express && previous.some(c => !c.express && c.pr && !c.landedAt)) throw new OrchError('another non-express candidate has an unlanded PR');
+  if (!express && previous.some(c => c.name !== replacing && !c.supersededBy && !c.express && c.pr && !c.landedAt && cache.prs?.find((p: any) => p.number === c.pr)?.state !== 'CLOSED')) throw new OrchError('another non-express candidate has an unlanded PR');
   if (express && previous.filter(c => c.express && c.createdAt.slice(0, 10) === now().slice(0, 10)).length >= r.expressPerDay) throw new OrchError('expressPerDay exhausted');
   const shipped = all.filter(d => store.status(repo, d.id)?.state === 'shipped').map(d => d.id);
   const ordered = dependencyOrder(all, ids, shipped);
@@ -137,12 +138,10 @@ export function rebuild(store: Store, repo: string, name: string, drop: string[]
   if (old.pr) { state = JSON.parse(gh(r, 'pr', 'view', String(old.pr), '--json', 'state')).state; if (state === 'MERGED') throw new OrchError('cannot rebuild merged candidate'); }
   const excluded = dependents(store.deliveries(repo), drop), ids = old.members.filter(id => !excluded.includes(id));
   if (!ids.length) throw new OrchError('nothing to rebuild', 4);
-  // The old PR is superseded by this operation; other unlanded candidates still block admission.
-  const savedPr = old.pr; delete old.pr; store.saveCandidate(old);
-  let next: Candidate;
-  try { next = build(store, repo, ids, old.express); }
-  finally { old.pr = savedPr; store.saveCandidate(old); }
-  if (savedPr && state !== 'CLOSED') gh(r, 'pr', 'close', String(savedPr), '--comment', `Replaced by candidate ${next.name}: https://github.com/${r.slug}/tree/${next.branch}`);
+  // Only this old candidate is exempted; its manifest stays intact during the build.
+  const next = build(store, repo, ids, old.express, old.name);
+  if (old.pr && state !== 'CLOSED') gh(r, 'pr', 'close', String(old.pr), '--comment', `Replaced by candidate ${next.name}: https://github.com/${r.slug}/tree/${next.branch}`);
+  old.supersededBy = next.name; store.saveCandidate(old);
   for (const id of excluded.filter(id => old.members.includes(id))) store.appendStatus(repo, id, { state: 'bounced', cand: next.name, reason: 'dropped during rebuild' });
   return next;
 }
@@ -166,7 +165,14 @@ export function reconcile(store: Store, repo: string) {
     c.pr = pr.number;
     if (pr.state === 'MERGED') c.landedAt ||= pr.mergedAt || now();
     store.saveCandidate(c);
-    if (pr.state !== 'CLOSED') for (const id of c.members) store.appendStatus(repo, id, { state: pr.state === 'MERGED' ? 'shipped' : 'in-cand', cand: c.name, pr: c.pr });
+    for (const id of c.members) {
+      const current = store.status(repo, id);
+      if (pr.state === 'CLOSED') {
+        if (current?.state === 'in-cand' && current.cand === c.name && !c.supersededBy) store.appendStatus(repo, id, { state: 'pending', cand: c.name, reason: 'PR closed without merge' });
+      } else if (pr.state === 'MERGED' || !current?.cand || current.cand === c.name) {
+        store.appendStatus(repo, id, { state: pr.state === 'MERGED' ? 'shipped' : 'in-cand', cand: c.name, pr: c.pr });
+      }
+    }
   }
   return store.candidates(repo);
 }
