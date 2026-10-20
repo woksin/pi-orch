@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, futimesSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export type Kind = 'l0' | 'owner' | 'lane';
@@ -11,7 +11,7 @@ export interface Repo { slug: string; mainCheckout: string; integrationWorktree:
 export interface Note { section: string; bullets: string[] }
 export interface Delivery { id: string; repo: string; issue: number; branch: string; sha: string; author: string; createdAt: string; deps: string[]; gateLog: string; notes: Note[]; intent: string; paths?: string[] }
 export interface DeliveryStatus { state: string; at: string; cand?: string; pr?: number; reason?: string }
-export interface Candidate { name: string; repo: string; base: string; branch: string; createdAt: string; members: string[]; bounced: { dId: string; reason: string }[]; express: boolean; headSha: string; gateLog?: string; gateSha?: string; pr?: number; landedAt?: string; supersededBy?: string }
+export interface Candidate { name: string; repo: string; base: string; branch: string; createdAt: string; members: string[]; bounced: { dId: string; reason: string }[]; express: boolean; headSha: string; gateLog?: string; gateSha?: string; gateMtimeMs?: number; gateSize?: number; gateDigest?: string; evidenceAfter?: string; lastGateLog?: string; pr?: number; landedAt?: string; supersededBy?: string }
 export const role = (id: string): Kind => id === 'L0' ? 'l0' : id.startsWith('R-') ? 'owner' : 'lane';
 export const now = () => new Date().toISOString();
 export function key(value: string): string {
@@ -25,23 +25,45 @@ export function readJson<T>(file: string, fallback?: T): T {
   try { return JSON.parse(readFileSync(file, 'utf8')); }
   catch (error: any) { if (error.code === 'ENOENT' && fallback !== undefined) return fallback; throw error; }
 }
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e.code !== 'ESRCH'; }
+}
 export function lock(file: string): () => void {
   mkdirSync(dirname(file), { recursive: true });
-  const fd = openSync(file, 'wx', 0o600);
-  writeFileSync(fd, JSON.stringify({ pid: process.pid, at: now() }));
-  return () => { closeSync(fd); unlinkSync(file); };
+  let fd: number;
+  try { fd = openSync(file, 'wx', 0o600); }
+  catch (error: any) {
+    if (error.code !== 'EEXIST') throw error;
+    const before = statSync(file);
+    let owner: any = {};
+    try { owner = readJson(file); } catch { /* A partial lock is recoverable after its lease expires. */ }
+    if (pidAlive(owner.pid) && Date.now() - before.mtimeMs <= 60000 || !owner.pid && Date.now() - before.mtimeMs <= 60000) throw error;
+    const current = statSync(file);
+    if (current.ino !== before.ino || current.mtimeMs !== before.mtimeMs) throw error;
+    unlinkSync(file);
+    fd = openSync(file, 'wx', 0o600);
+  }
+  const token = randomBytes(16).toString('hex');
+  writeFileSync(fd, JSON.stringify({ pid: process.pid, at: now(), token }));
+  const renew = setInterval(() => { try { const t = new Date(); futimesSync(fd, t, t); } catch { /* Release/exit owns cleanup. */ } }, 15000);
+  renew.unref();
+  return () => {
+    clearInterval(renew); closeSync(fd);
+    try { if (readJson<any>(file).token === token) unlinkSync(file); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+  };
 }
 export function atomic(file: string, value: unknown, immutable = false): boolean {
   mkdirSync(dirname(file), { recursive: true });
-  const release = lock(`${file}.lock`);
   const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    if (immutable && existsSync(file)) return false;
     const fd = openSync(tmp, 'wx', 0o600);
     try { writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
-    renameSync(tmp, file);
+    if (immutable) {
+      try { linkSync(tmp, file); } catch (e: any) { if (e.code === 'EEXIST') return false; throw e; }
+    } else renameSync(tmp, file);
     return true;
-  } finally { if (existsSync(tmp)) unlinkSync(tmp); release(); }
+  } finally { if (existsSync(tmp)) unlinkSync(tmp); }
 }
 export function files(dir: string): string[] {
   try { return readdirSync(dir).filter(f => f.endsWith('.json')).sort(); }
@@ -66,9 +88,14 @@ export class Store {
     if (!Number.isFinite(input.ackDeadlineMin) || input.ackDeadlineMin <= 0) throw new Error('deadline must be positive');
     if (input.blocks?.some(b => !['push', 'pr-create', 'pr-merge'].includes(b))) throw new Error('invalid blocks');
     if (['hold', 'release'].includes(input.kind) && (!input.repo || !input.blocks?.length)) throw new Error('hold/release requires repo and blocks');
-    const sessions = this.list<any>('sessions');
+    const sessions = this.list<any>('sessions').map(s => {
+      const assignment = s.key ? readJson<any>(this.path('assignments', `${key(s.key)}.json`), {}) : {};
+      const id = s.envId || assignment.id || (s.key ? `S-${s.key}` : s.id);
+      const kind = s.envId ? role(s.envId) : assignment.role || (!s.key ? s.kind || role(id) : undefined);
+      return { ...s, id, kind };
+    });
     const recipients = ['ALL', 'owners', 'lanes'].includes(input.to)
-      ? sessions.filter(s => input.to === 'ALL' || role(s.id) === (input.to === 'owners' ? 'owner' : 'lane')).map(s => s.id)
+      ? sessions.filter(s => input.to === 'ALL' || s.kind === (input.to === 'owners' ? 'owner' : 'lane')).map(s => s.key || s.id)
       : [key(input.to)];
     return [...new Set<string>(recipients)].map(to => {
       const message = { ...input, to, id: factId(input.from), createdAt: now() };
