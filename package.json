@@ -2,11 +2,24 @@
   "name": "@woksin/pi-orch",
   "version": "0.0.1",
   "private": true,
-  "description": "Repo-owner orchestration for multi-session pi: order bus, ledger, shared GitHub poller, batched candidate PRs",
+  "description": "Lean repo-owner orchestration: durable order bus, batched candidate PRs, shared GitHub poller",
   "license": "MIT",
   "author": "woksin",
   "type": "module",
-  "scripts": { "test": "node --test --test-timeout=30000 'test/*.test.ts'" },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
-  "pi": { "extensions": ["./src/extension/lane-bus.ts"] }
+  "scripts": {
+    "test": "node --test --test-timeout=30000 'test/*.test.ts'",
+    "check": "node test/check.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension/lane-bus.ts"
+    ]
+  },
+  "bin": {
+    "orch": "./bin/orch",
+    "orch-poll": "./bin/orch-poll"
+  }
 }
