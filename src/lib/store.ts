@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { closeSync, existsSync, fsyncSync, futimesSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { broadcastSessions } from './identity.ts';
 
 export type Kind = 'l0' | 'owner' | 'lane';
 export const messageKinds = ['order', 'info', 'question', 'report', 'idle', 'rule', 'hold', 'release', 'ci', 'escalation'];
@@ -91,17 +92,14 @@ export class Store {
     if (!Number.isFinite(input.ackDeadlineMin) || input.ackDeadlineMin <= 0) throw new Error('deadline must be positive');
     if (input.blocks?.some(b => !['push', 'pr-create', 'pr-merge'].includes(b))) throw new Error('invalid blocks');
     if (['hold', 'release'].includes(input.kind) && (!input.repo || !input.blocks?.length)) throw new Error('hold/release requires repo and blocks');
-    const sessions = this.list<any>('sessions').map(s => {
-      const assignment = s.key ? readJson<any>(this.path('assignments', `${key(s.key)}.json`), {}) : {};
-      const id = s.envId || assignment.id || (s.key ? `S-${s.key}` : s.id);
-      const kind = s.envId ? role(s.envId) : assignment.role || (!s.key ? s.kind || role(id) : undefined);
-      return { ...s, id, kind };
-    });
+    const sessions = broadcastSessions(this);
     const recipients = ['ALL', 'owners', 'lanes'].includes(input.to)
-      ? sessions.filter(s => input.to === 'ALL' || s.kind === (input.to === 'owners' ? 'owner' : 'lane')).map(s => s.key || s.id)
+      ? sessions.filter(s => input.to === 'ALL' || s.role === (input.to === 'owners' ? 'owner' : 'lane')).map(s => s.key || s.id)
       : [key(input.to)];
     return [...new Set<string>(recipients)].map(to => {
-      const message = { ...input, ...(['ALL', 'owners', 'lanes'].includes(input.to) ? { refs: { ...input.refs, broadcast: input.to } } : {}), to, id: factId(input.from), createdAt: now() };
+      const target = readJson<any>(this.path('sessions', `${to}.json`), {});
+      const refs = { ...input.refs, ...(['ALL', 'owners', 'lanes'].includes(input.to) ? { broadcast: input.to } : {}), ...(target.processIdentity ? { processIdentity: target.processIdentity } : {}) };
+      const message = { ...input, ...(Object.keys(refs).length ? { refs } : {}), to, id: factId(input.from), createdAt: now() };
       atomic(this.path('inbox', to, `${message.id}.json`), message, true);
       return message;
     });

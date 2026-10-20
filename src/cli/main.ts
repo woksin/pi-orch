@@ -43,20 +43,20 @@ export function main(argv = process.argv.slice(2), store = new Store(), options:
       } else if (command === 'owners') console.log(JSON.stringify(owners(store, options), null, 2));
       else {
         if (!to || to.startsWith('--')) throw new OrchError('required: session key or tty', 1);
-        data = command === 'unenrol' ? unenrol(store, to, options) : enrol(store, to, { id: need('id'), role: need('role') as any, repo: f.repo, rules: f['rules-file'] ? readFileSync(f['rules-file'], 'utf8') : undefined, by: cliIdentity(store, env).assigned ? cliIdentity(store, env).id : 'L0' }, options);
+        data = command === 'unenrol' ? unenrol(store, to, options) : enrol(store, to, { id: need('id'), role: need('role') as any, repo: f.repo, rules: f['rules-file'] ? readFileSync(f['rules-file'], 'utf8') : undefined, by: cliIdentity(store, env, options).assigned ? cliIdentity(store, env, options).id : 'L0' }, options);
         console.log(JSON.stringify(data, null, 2));
       }
       return 0;
     }
     if (command === 'send') {
       if (!to || to.startsWith('--')) throw new OrchError('required: recipient', 1);
-      data = store.send({ to, from: cliIdentity(store, env).assigned ? cliIdentity(store, env).id : 'L0', kind: need('kind'), subject: need('subject'), body: readFileSync(f['body-file'] || 0, 'utf8'), requiresAck: !!f.ack, ackDeadlineMin: Number(f.deadline || 30), ...(f.repo ? { repo: f.repo } : {}), ...(f.blocks ? { blocks: csv('blocks') as any } : {}) });
+      data = store.send({ to, from: cliIdentity(store, env, options).assigned ? cliIdentity(store, env, options).id : 'L0', kind: need('kind'), subject: need('subject'), body: readFileSync(f['body-file'] || 0, 'utf8'), requiresAck: !!f.ack, ackDeadlineMin: Number(f.deadline || 30), ...(f.repo ? { repo: f.repo } : {}), ...(f.blocks ? { blocks: csv('blocks') as any } : {}) });
     } else if (command === 'board') { const b = board(store); console.log(f.json ? JSON.stringify(b, null, 2) : boardMarkdown(b)); return 0; }
     else {
       const repo = need('repo'); key(repo); store.repo(repo);
       const release = lock(store.path('locks', `${repo}.lock`));
       try {
-        if (['push', 'land', 'rebuild'].includes(command)) authorizePublication(store, repo, command as 'push' | 'land' | 'rebuild', env);
+        if (['push', 'land', 'rebuild'].includes(command)) authorizePublication(store, repo, command as 'push' | 'land' | 'rebuild', env, options);
         switch (command) {
           case 'deliver': data = deliver(store, { repo, branch: need('branch'), issue: need('issue'), notesFile: need('notes-file'), intent: need('intent'), gateLog: need('gate-log'), sha: f.sha, deps: csv('deps'), paths: csv('paths') }); break;
           case 'plan': data = plan(store, repo); if (!(data as any).pending.length) { console.log(JSON.stringify(data)); return 4; } break;

@@ -112,6 +112,7 @@ function operation(raw: string[]): string[] {
   let i = 0;
   const binary = words[i++]?.split('/').at(-1);
   if (binary === 'orch') {
+    if (['enrol', 'unenrol'].includes(words[1])) return ['assignment-change'];
     if (words[1] !== 'cand') return [];
     return ({ push: ['push', 'pr-create'], land: ['pr-merge'], rebuild: ['pr-close'] } as Record<string, string[]>)[words[2]] || [];
   }
@@ -132,6 +133,7 @@ export function guard(command: string, kind: string, primary: boolean, repo: str
     for (const op of operation(words)) {
       if (op === 'watch') return 'use orch_status; orch-poll wakes you';
       if (op && (kind === 'lane' || !primary)) return `deliver to R-${repo || '<repo>'}: orch deliver ...`;
+      if (op === 'assignment-change' && kind !== 'l0') return 'enrol/unenrol requires L0 or an outside operator';
       if (kind === 'owner' && active.includes(op as Block)) return `hold for ${repo}: ${op} blocked`;
     }
   }
