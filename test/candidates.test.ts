@@ -87,6 +87,9 @@ test('rebuild drops deliveries and dependents, links replacement and closes old 
     const c = build(f.store, 'Test', [a.id, b.id, d.id]); gate(f.store, 'Test', c.name, f.gateLog); push(f.store, 'Test', c.name);
     const next = rebuild(f.store, 'Test', c.name, [a.id]); assert.deepEqual(next.members, [d.id]); assert.notEqual(next.name, c.name);
     const calls = readFileSync(f.ghCalls, 'utf8'); assert.match(calls, /"close"/); assert.match(calls, /Replaced by candidate/); assert.equal(f.store.status('Test', b.id)?.state, 'bounced');
+    writeFileSync(f.ghData, JSON.stringify({ view: { number: 10, state: 'MERGED' } })); assert.throws(() => rebuild(f.store, 'Test', c.name, [a.id]), /merged candidate/);
+    writeFileSync(f.ghData, JSON.stringify({ view: { number: 10, state: 'CLOSED' } })); rebuild(f.store, 'Test', c.name, [a.id]); assert.match(readFileSync(f.ghCalls, 'utf8'), /"comment"/);
+    assert.throws(() => rebuild(f.store, 'Test', c.name, [a.id, d.id]), (e: any) => e.code === 4);
   } finally { f.restore(); }
 });
 

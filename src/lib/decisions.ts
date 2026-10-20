@@ -63,26 +63,29 @@ export function holds(messages: Message[], repo?: string): Block[] {
 }
 // Tokenize executable positions, not quoted prose. Recurse into shell -c payloads and substitutions.
 export function commands(text: string): string[][] {
-  const tokens = text.match(/'(?:[^']*)'|"(?:\\.|[^"\\])*"|\\.|&&|\|\||[;|&\n()<>]|[^\s;'"|&()<>]+/g) || [];
+  const tokens = text.match(/'(?:[^']*)'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|\\.|&&|\|\||[;|&\n()<>]|[^\s;'"`|&()<>]+/g) || [];
   const result: string[][] = []; let current: string[] = [];
   const flush = () => { if (current.length) result.push(current); current = []; };
   for (const token of tokens) {
     if (/^(?:&&|\|\||[;|&\n()<>])$/.test(token)) { flush(); continue; }
     const word = token.replace(/^(['"])([\s\S]*)\1$/, '$2').replace(/\\(.)/g, '$1');
     current.push(word);
+    if (token.startsWith('`')) result.push(...commands(token.slice(1, -1)));
     if (token.startsWith('"')) for (const sub of word.matchAll(/\$\((.*?)\)|`(.*?)`/g)) result.push(...commands(sub[1] || sub[2]));
   }
   flush();
   return result.flatMap(words => {
     const nested: string[][] = [];
-    for (let i = 0; i < words.length; i++) if (/^(?:.*\/)?(?:bash|sh|zsh)$/.test(words[i])) {
-      const at = words.findIndex((w, n) => n > i && /^-[a-z]*c[a-z]*$/.test(w));
-      if (at >= 0 && words[at + 1]) nested.push(...commands(words[at + 1]));
+    const executable = executableWords(words);
+    if (/^(?:.*\/)?(?:bash|sh|zsh)$/.test(executable[0] || '')) {
+      const at = executable.findIndex((w, n) => n > 0 && /^-[a-z]*c[a-z]*$/.test(w));
+      if (at >= 0 && executable[at + 1]) nested.push(...commands(executable[at + 1]));
     }
+    if (executable[0] === 'eval') nested.push(...commands(executable.slice(1).join(' ')));
     return [words, ...nested];
   });
 }
-function operation(words: string[]): string | undefined {
+function executableWords(words: string[]): string[] {
   let i = 0;
   while (i < words.length) {
     const word = words[i], name = word.split('/').at(-1);
@@ -98,6 +101,11 @@ function operation(words: string[]): string | undefined {
     }
     break;
   }
+  return words.slice(i);
+}
+function operation(raw: string[]): string | undefined {
+  const words = executableWords(raw);
+  let i = 0;
   const binary = words[i++]?.split('/').at(-1);
   if (!['git', 'gh'].includes(binary!)) return;
   while (words[i]?.startsWith('-')) {

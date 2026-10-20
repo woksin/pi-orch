@@ -23,11 +23,11 @@ test('lane-bus delivery formatting, receipts, reminder and L0 digest decisions',
 });
 
 test('guard decisions: workers, owners, holds/releases, watches, unrelated commands', () => {
-  for (const cmd of ['git push', 'git -C /tmp/x push origin topic', 'gh pr create', 'gh pr merge 2', 'gh pr ready', 'gh pr close', 'gh release create v1', 'gh workflow run x', 'bash -lc "git push"', 'true && gh pr create', 'env -u GH_TOKEN git push', 'timeout 30 gh pr merge 2', 'env FOO=x /usr/bin/git -C/tmp push', 'echo "$(git push)"']) assert.match(guard(cmd, 'lane', true, 'Test', [])!, /deliver to R-Test/);
+  for (const cmd of ['git push', 'git -C /tmp/x push origin topic', 'gh pr create', 'gh pr merge 2', 'gh pr ready', 'gh pr close', 'gh release create v1', 'gh workflow run x', 'bash -lc "git push"', 'true && gh pr create', 'env -u GH_TOKEN git push', 'timeout 30 gh pr merge 2', 'env FOO=x /usr/bin/git -C/tmp push', 'echo "$(git push)"', 'echo `git push`', "eval 'gh pr create'"]) assert.match(guard(cmd, 'lane', true, 'Test', [])!, /deliver to R-Test/);
   for (const cmd of ['gh run watch 1', 'gh pr checks 2 --watch', "bash -c 'gh run watch 1'"]) assert.match(guard(cmd, 'l0', true, 'Test', [])!, /orch_status/);
   assert.ok(guard('git push', 'owner', false, 'Test', []));
   assert.ok(guard('git push', 'owner', true, 'Test', ['push']));
-  for (const cmd of ['git status', 'gh pr view 2', 'echo "git push"', 'printf gh', 'git show HEAD:push', 'orch deliver --repo Test']) assert.equal(guard(cmd, 'lane', true, 'Test', []), undefined);
+  for (const cmd of ['git status', 'gh pr view 2', 'echo "git push"', 'printf gh', "echo bash -c 'git push'", "echo 'bash -lc gh pr create'", "printf '%s' '`git push`'", 'git show HEAD:push', 'orch deliver --repo Test']) assert.equal(guard(cmd, 'lane', true, 'Test', []), undefined);
   const m: any = { createdAt: '2026-01-01', id: 'a', kind: 'hold', repo: 'Test', blocks: ['push', 'pr-create'] };
   assert.deepEqual(holds([m, { ...m, id: 'b', kind: 'release', blocks: ['push'] }], 'Test'), ['pr-create']);
 });

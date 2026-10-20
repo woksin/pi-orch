@@ -140,7 +140,11 @@ export function rebuild(store: Store, repo: string, name: string, drop: string[]
   if (!ids.length) throw new OrchError('nothing to rebuild', 4);
   // Only this old candidate is exempted; its manifest stays intact during the build.
   const next = build(store, repo, ids, old.express, old.name);
-  if (old.pr && state !== 'CLOSED') gh(r, 'pr', 'close', String(old.pr), '--comment', `Replaced by candidate ${next.name}: https://github.com/${r.slug}/tree/${next.branch}`);
+  if (old.pr) {
+    const comment = `Replaced by candidate ${next.name}: https://github.com/${r.slug}/tree/${next.branch}`;
+    if (state === 'CLOSED') gh(r, 'pr', 'comment', String(old.pr), '--body', comment);
+    else gh(r, 'pr', 'close', String(old.pr), '--comment', comment);
+  }
   old.supersededBy = next.name; store.saveCandidate(old);
   for (const id of excluded.filter(id => old.members.includes(id))) store.appendStatus(repo, id, { state: 'bounced', cand: next.name, reason: 'dropped during rebuild' });
   return next;
