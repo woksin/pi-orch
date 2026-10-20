@@ -12,3 +12,14 @@ test('B1: async metadata coalesces probes, caches new/resume reads, and refreshe
     await read(f.store, f.main, 1); assert.equal(calls, count); time += 30001; await read(f.store, f.main, 1); assert.ok(calls > count);
   } finally { f.restore(); }
 });
+
+test('process start probe is independent of the caller locale and timezone', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { processStart, processStartAsync } = await import('../src/lib/metadata.ts');
+  const local = processStart(process.pid);
+  assert.ok(local);
+  assert.equal(await processStartAsync(process.pid), local);
+  const script = `import { processStart } from ${JSON.stringify(new URL('../src/lib/metadata.ts', import.meta.url).href)}; process.stdout.write(processStart(${process.pid}) ?? '');`;
+  const foreign = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'nb_NO.UTF-8', LANG: 'nb_NO.UTF-8', TZ: 'Asia/Tokyo' } });
+  assert.equal(foreign, local);
+});

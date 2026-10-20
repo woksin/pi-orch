@@ -3,13 +3,16 @@ import { canonical } from './paths.ts';
 import { renewLocks } from './store.ts';
 import type { Store } from './store.ts';
 
+// Pin locale and timezone: `ps -o lstart=` output depends on both, and process-identity bindings compare it across processes
+// (pi sessions in a terminal vs launchd poller) — an unpinned probe would make every live binding look reused.
+export const probeEnv = () => ({ ...process.env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC' });
 export function probe(command: string, args: string[]): string {
   renewLocks();
-  try { return execFileSync(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return ''; }
+  try { return execFileSync(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], env: probeEnv() }).trim(); } catch { return ''; }
   finally { renewLocks(); }
 }
 export function probeAsync(command: string, args: string[]): Promise<string> {
-  return new Promise(resolve => execFile(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? '' : stdout.trim())));
+  return new Promise(resolve => execFile(command, args, { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, env: probeEnv() }, (error, stdout) => resolve(error ? '' : stdout.trim())));
 }
 export const processStart = (pid: number) => probe('ps', ['-o', 'lstart=', '-p', String(pid)]) || undefined;
 export const processStartAsync = async (pid: number) => await probeAsync('ps', ['-o', 'lstart=', '-p', String(pid)]) || undefined;
