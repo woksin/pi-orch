@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { atomic, now, readJson } from '../src/lib/store.ts';
 import { acquirePollLock, pollOnce, rollup } from '../src/lib/poller.ts';
 import { fixture } from './helpers.ts';
@@ -43,5 +43,18 @@ test('poller reclaims a stale crash lock and keeps single-instance exclusion', (
     atomic(f.store.path('poller.lock'), { pid: 2147483647, at: new Date().toISOString() });
     const release = acquirePollLock(f.store); assert.throws(() => acquirePollLock(f.store), /EEXIST/); release();
     assert.deepEqual(pollOnce(f.store).errors, []);
+  } finally { f.restore(); }
+});
+
+
+test('N1: each poller tick prunes dead and reused assignment bindings, including tombstones', () => {
+  const f = fixture(); try {
+    for (const [key, pid, start, id] of [['w11', 11, 'start', 'L11'], ['p12', 12, 'old', 'L12'], ['w13', 13, 'start', 'L13'], ['w14', 14, 'start', null], ['p15', 15, 'start', 'L15']]) {
+      atomic(f.store.path('assignments', `${key}.json`), { key, id, binding: { pid, start } });
+    }
+    const options = { alive: (pid: number) => pid !== 11 && pid !== 14, start: (pid: number) => pid === 15 ? undefined : 'start' };
+    assert.deepEqual(pollOnce(f.store, Date.now(), options).errors, []);
+    assert.deepEqual(f.store.list<any>('assignments').map(a => a.key), ['p15', 'w13']);
+    assert.equal(existsSync(f.store.path('locks', 'assignments.lock')), false);
   } finally { f.restore(); }
 });

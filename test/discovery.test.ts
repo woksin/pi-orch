@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomic, now } from '../src/lib/store.ts';
 import { active, authorizePublication, enrol, identity, metadata, originSlug, owners, sessionKey, sessions, unenrol } from '../src/lib/discovery.ts';
@@ -143,5 +143,46 @@ test('A5: prune dead registrations, broadcast only to fresh rooted sessions, and
     const discovered = { ...options, processes: () => [{ pid: 404, cwd: f.main }, { pid: 405, cwd: f.root + '-outside' }], inspect: () => ({ detectedRepo: 'Test' }) };
     assert.deepEqual(sessions(f.store, true, discovered).filter(s => !s.instrumented).map(s => s.key), ['p404']);
     assert.throws(() => enrol(f.store, 'p404', { id: 'L4', role: 'lane', repo: 'Test', by: 'L0' }, discovered), /not instrumented/);
+  } finally { f.restore(); }
+});
+
+
+test('N1: sessions and enrol prune dead/mismatched bound assignments, retaining matching and unknown starts', () => {
+  const f = fixture(); try {
+    const seed = () => {
+      for (const [key, pid, start, id] of [['w11', 11, START, 'dead'], ['p12', 12, 'old', 'reused'], ['w13', 13, START, 'matching'], ['p14', 14, START, 'unknown'], ['w15', 15, START, null]]) {
+        atomic(f.store.path('assignments', `${key}.json`), { key, id, role: id ? 'lane' : null, repo: 'Test', binding: { pid, start } });
+      }
+      atomic(f.store.path('assignments', 'legacy.json'), { key: 'legacy', id: 'legacy' });
+    };
+    const probe = { ...options, alive: (pid: number) => pid !== 11 && pid !== 15, start: (pid: number) => pid === 14 ? undefined : START };
+    const remaining = () => f.store.list<any>('assignments').map(a => a.key).sort();
+    seed(); assert.equal(main(['sessions', '--json'], f.store, probe), 0);
+    assert.deepEqual(remaining(), ['legacy', 'p14', 'w13']);
+    seed(); register(f, 'w20'); enrol(f.store, 'w20', { id: 'L20', role: 'lane', repo: 'Test', by: 'L0' }, probe);
+    assert.deepEqual(remaining(), ['legacy', 'p14', 'w13', 'w20']);
+    assert.equal(existsSync(f.store.path('locks', 'assignments.lock')), false);
+  } finally { f.restore(); }
+});
+
+test('N1: unenrol by key/id removes dead or unregistered assignments without weakening lane authorization', () => {
+  const f = fixture(); try {
+    for (const state of ['dead', 'unregistered', 'reused']) for (const by of ['key', 'id']) {
+      const key = 'w10', id = 'L10', file = f.store.path('assignments', `${key}.json`);
+      atomic(file, { key, id, role: 'lane', repo: 'Test', binding: { pid: 10, start: START } });
+      if (state !== 'unregistered') register(f, key, { pid: 101, hostStart: START, processIdentity: { pid: 10, start: START } });
+      const probe = { ...options, alive: () => state !== 'dead', start: () => state === 'reused' ? 'new' : START };
+      assert.equal(main(['unenrol', by === 'key' ? key : id], f.store, probe), 0);
+      assert.equal(existsSync(file), false, `${state}/${by}`);
+      // Clear registration without invoking discovery (the next case is genuinely unregistered).
+      if (existsSync(f.store.path('sessions', `${key}.json`))) unlinkSync(f.store.path('sessions', `${key}.json`));
+    }
+    register(f, 'w20'); enrol(f.store, 'w20', { id: 'L20', role: 'lane', repo: 'Test', by: 'L0' }, options);
+    const file = f.store.path('assignments', 'w10.json');
+    atomic(file, { key: 'w10', id: 'L10', role: 'lane', repo: 'Test', binding: { pid: 10, start: START } });
+    const caller = { ...options, ancestors: () => [process.pid], alive: (pid: number) => pid !== 10 };
+    assert.throws(() => unenrol(f.store, 'L10', caller), /requires L0/); assert.equal(existsSync(file), true);
+    assert.throws(() => unenrol(f.store, 'w20', caller), /requires L0/);
+    assert.throws(() => unenrol(f.store, 'missing', options), /session not found or ambiguous/);
   } finally { f.restore(); }
 });

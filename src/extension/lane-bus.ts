@@ -37,7 +37,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
   const env = options.env || { ...process.env }, pid = options.pid || process.pid;
   const store = new Store(env.ORCH_HOME), clock = options.clock || Date.now, skey = sessionKey(env, pid);
   const initialConfig = config(store);
-  if (!initialConfig.error && (env.PI_ORCH_OPTOUT === '1' || !initialConfig.roots.length) && !env.PI_ORCH_ID && !existsSync(store.path('assignments', `${skey}.json`))) return;
+  if (!initialConfig.error && (env.PI_ORCH_OPTOUT === '1' || !initialConfig.roots.length) && !env.PI_ORCH_ID) return;
   const handoff = options.handoff || handoffActive;
   const interval = options.interval || ((fn, ms) => setInterval(fn, ms));
   const clear = options.clear || (timer => clearInterval(timer as ReturnType<typeof setInterval>));
@@ -68,14 +68,16 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     const error = config(store).error;
     if (error && !warnings.has(error)) { warnings.add(error); ctx.ui.notify(`orch: ${error}; discovery dormant`, 'error'); }
   }
+  function setToolsVisible(visible: boolean) {
+    if (!pi.getActiveTools || !pi.setActiveTools) return;
+    const before = pi.getActiveTools(), after = visible ? [...new Set([...before, ...toolNames])] : before.filter(n => !toolNames.includes(n));
+    if (JSON.stringify(before) !== JSON.stringify(after)) pi.setActiveTools(after);
+  }
   function presentation() {
     if (!context) return false;
     const visible = current.assigned || entries().length > 0;
     if (visible) registerTools();
-    if (pi.getActiveTools && pi.setActiveTools) {
-      const before = pi.getActiveTools(), after = visible ? [...new Set([...before, ...toolNames])] : before.filter(n => !toolNames.includes(n));
-      if (JSON.stringify(before) !== JSON.stringify(after)) pi.setActiveTools(after);
-    }
+    setToolsVisible(visible);
     if (!visible) context.ui.setStatus('orch', undefined);
     return visible;
   }
@@ -130,7 +132,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
   function stop() {
     epoch++;
     context?.ui.setStatus('orch', undefined);
-    if (pi.getActiveTools && pi.setActiveTools) pi.setActiveTools(pi.getActiveTools().filter(n => !toolNames.includes(n)));
+    setToolsVisible(false);
     timers.forEach(clear); timers = [];
     inboxWatches.forEach(w => w.close?.()); inboxWatches = []; watchedBoxes = '';
     assignmentWatch?.close?.(); assignmentWatch = undefined;
@@ -169,9 +171,11 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
         }
         if (generation === epoch && primary && active(store, ctx.cwd, env)) { refreshIdentity(); heartbeat(); safelyScan(); }
       } catch (error: any) {
-        if (generation !== epoch || !primary || !active(store, ctx.cwd, env)) return;
-        admissionError = error.message; admittedEnv = false; refreshIdentity(); registration();
-        ctx.ui.notify(`orch: ${error.message}`, 'error');
+        try {
+          if (generation !== epoch || !primary || !active(store, ctx.cwd, env)) return;
+          admissionError = error.message; admittedEnv = false; refreshIdentity(); registration();
+          ctx.ui.notify(`orch: ${error.message}`, 'error');
+        } catch { /* A failed store or stale UI must not reject deferred startup. */ }
       }
     };
     if (options.defer) options.defer(fill); else setImmediate(() => { void fill(); });
@@ -188,9 +192,10 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     return { message: { customType: 'orch-role', content: `Orch role ${current.role} (${current.id}). Orders arrive as messages; use order_ack/orch_status. Owners reconcile at session start.`, display: false } };
   });
   pi.on('tool_call', (event, ctx) => {
+    const scoped = active(store, ctx.cwd, env);
+    if (!scoped && !env.PI_ORCH_ID) return;
     notifyConfig(ctx);
     if (!['bash', 'job_start', 'job_watch'].includes(event.toolName)) return;
-    const scoped = active(store, ctx.cwd, env);
     const guarded = scoped ? actor() : identity(store, skey, env, info.processIdentity || null);
     if (!scoped && !guarded.assigned && !guarded.pending) return;
     const input = event.input as Record<string, unknown>;

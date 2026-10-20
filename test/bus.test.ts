@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import laneBus, { handoffActive } from '../src/extension/lane-bus.ts';
@@ -205,4 +205,58 @@ test('A7: env owner bootstrap is refused while a bound owner exists, including s
     assert.match(duplicate.errors.join('\n'), /ID already/); assert.ok(duplicate.tool('git push')?.block); assert.equal(duplicate.sent.length, 0); assert.equal(duplicate.tools.size, 0);
     assert.equal(duplicate.store.list<any>('sessions').find(s => s.key === duplicate.key).assigned, false);
   } finally { owner.stop(); duplicate.stop(); }
+});
+
+
+test('N1: unpinned unscoped sessions ignore stale and live assignments, while scoped matching lanes guard push', async () => {
+  const START = '2020-01-01T00:00:00.000Z';
+  for (const wrapper of [undefined, '12345']) for (const start of [START, '2019-01-01T00:00:00.000Z']) {
+    for (const scope of ['outside', 'excluded', 'optout', 'missing']) {
+      const h = busFixture({ wrapper, optout: scope === 'optout' ? '1' : undefined, configured: scope !== 'missing', setup(store, key) {
+        atomic(store.path('assignments', `${key}.json`), { key, id: 'L9', role: 'lane', repo: 'Test', binding: { pid: Number(wrapper) || process.pid, start } });
+      } });
+      try {
+        if (scope === 'excluded') atomic(h.store.path('config.json'), { roots: [h.root], excludes: [h.root] });
+        h.send(h.key);
+        await h.start('unscoped', true, scope === 'outside' ? h.root + '-outside' : h.root);
+        assert.equal(h.tool('git push'), undefined, `${scope}/${h.key}/${start}`);
+        assert.equal(h.tool('orch unenrol own', 'job_start'), undefined);
+        assert.equal(h.store.list('sessions').length, 0); assert.equal(h.store.list('heartbeats').length, 0);
+        assert.equal(h.sent.length, 0); assert.equal(h.tools.size, 0); assert.equal(h.timers.length, 0); assert.equal(h.watches.length, 0); assert.equal(h.toolUpdates.length, 0);
+        if (scope === 'optout' || scope === 'missing') assert.equal(h.handlers.size, 0);
+      } finally { h.stop(); }
+    }
+  }
+  for (const wrapper of [undefined, '12345']) {
+    const h = busFixture({ wrapper, setup(store, key) {
+      atomic(store.path('assignments', `${key}.json`), { key, id: 'L9', role: 'lane', repo: 'Test', binding: { pid: Number(wrapper) || process.pid, start: START } });
+    } });
+    try { await h.start(); assert.equal(h.store.list<any>('sessions')[0].assigned, true); assert.match(h.tool('git push')?.reason, /deliver to R-Test/); assert.equal(h.tools.size, 5); }
+    finally { h.stop(); }
+  }
+});
+
+test('N2: deferred startup swallows failures in its error notification and registration', async () => {
+  const notify = busFixture({ metadata() { throw new Error('metadata failed'); }, notify() { throw new Error('stale context'); } });
+  try { await assert.doesNotReject(notify.start()); assert.match(notify.errors[0], /metadata failed/); }
+  finally { notify.stop(); }
+  const disk = busFixture({ metadata(store) {
+    renameSync(store.path('sessions'), store.path('saved-sessions'));
+    writeFileSync(store.path('sessions'), 'not a directory');
+    throw new Error('metadata failed');
+  } });
+  try { await assert.doesNotReject(disk.start()); }
+  finally { unlinkSync(disk.store.path('sessions')); renameSync(disk.store.path('saved-sessions'), disk.store.path('sessions')); disk.stop(); }
+});
+
+test('N3: inactive starts/stops and unchanged presentation never reset the active tool set', async () => {
+  const h = busFixture();
+  try {
+    for (let i = 0; i < 2; i++) { await h.start('outside', true, h.root + '-outside'); h.stop(); }
+    await h.start(); h.tick(); h.stop(); h.stop(); assert.deepEqual(h.toolUpdates, []);
+    await h.start(); h.send(h.key); h.tick(); assert.equal(h.toolUpdates.length, 1); assert.equal(h.activeTools.length, 6);
+    h.tick(); h.tick(30000); h.watch(); assert.equal(h.toolUpdates.length, 1);
+    h.stop(); assert.equal(h.toolUpdates.length, 2); assert.deepEqual(h.activeTools, ['bash']);
+    h.stop(); await h.start('outside', true, h.root + '-outside'); h.stop(); assert.equal(h.toolUpdates.length, 2);
+  } finally { h.stop(); }
 });

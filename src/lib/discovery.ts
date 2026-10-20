@@ -1,6 +1,6 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import { basename } from 'node:path';
-import { atomic, key, lock, now, pidAlive, readJson, Store } from './store.ts';
+import { atomic, files, key, lock, now, pidAlive, readJson, Store } from './store.ts';
 import type { Kind } from './store.ts';
 import { canonical } from './paths.ts';
 import { guard, holds } from './decisions.ts';
@@ -32,6 +32,22 @@ function startReader(options: DiscoveryOptions) {
   const values = new Map<number, string | undefined>();
   return (pid: number) => { if (!values.has(pid)) values.set(pid, (options.start || processStart)(pid)); return values.get(pid); };
 }
+function staleBinding(binding: Binding | undefined, alive: (pid: number) => boolean, start: (pid: number) => string | undefined) {
+  if (!binding?.pid || !binding.start) return false;
+  if (!alive(binding.pid)) return true;
+  const actual = start(binding.pid);
+  return !!actual && actual !== binding.start;
+}
+export function pruneAssignments(store: Store, options: DiscoveryOptions = {}) {
+  const alive = options.alive || pidAlive, start = startReader(options);
+  const release = lock(store.path('locks', 'assignments.lock'));
+  try {
+    for (const name of files(store.path('assignments'))) {
+      const file = store.path('assignments', name), assignment = readJson<Partial<Assignment>>(file, {});
+      if (staleBinding(assignment.binding, alive, start)) unlinkSync(file);
+    }
+  } finally { release(); }
+}
 function removeRegistration(store: Store, s: any) {
   const path = store.path('sessions', `${key(s.key)}.json`);
   if (JSON.stringify(readJson(path, {})) !== JSON.stringify(s)) return;
@@ -58,6 +74,7 @@ export function registeredSessions(store: Store, options: DiscoveryOptions = {},
   });
 }
 export function sessions(store: Store, all = false, options: DiscoveryOptions = {}) {
+  pruneAssignments(store, options);
   const result = registeredSessions(store, options), start = startReader(options), alive = options.alive || pidAlive;
   if (all) for (const p of (options.processes || discoverProcesses)()) {
     if (!p.cwd || !active(store, p.cwd, {}) || !alive(p.pid)) continue;
@@ -140,15 +157,25 @@ export function enrol(store: Store, target: string, input: { id: string; role: K
   } finally { release(); }
 }
 export function unenrol(store: Store, target: string, options: DiscoveryOptions = {}) {
-  const s = targetSession(store, target, options, true);
+  // Resolve assignments first: discovery may already have removed a dead registration.
+  const assignments = files(store.path('assignments')).map(name => ({ key: name.slice(0, -5), value: readJson<any>(store.path('assignments', name)) }));
+  const matching = assignments.filter(a => a.value.id === target);
+  const found = assignments.find(a => a.key === target) || (matching.length === 1 ? matching[0] : undefined);
+  if (!found && matching.length > 1) throw new Error(`session not found or ambiguous: ${target}`);
+  const registration = found ? readJson<any>(store.path('sessions', `${key(found.key)}.json`), {}) : undefined;
+  const s = found ? { ...registration, key: found.key, pid: registration.pid || found.value.binding?.pid, processIdentity: found.value.binding } : targetSession(store, target, options, true);
   authorizeAdmin(store, s, options);
   const release = lock(store.path('locks', 'assignments.lock'));
   try {
     authorizeAdmin(store, s, options);
-    const a = readJson<any>(store.path('assignments', `${key(s.key)}.json`), {});
-    if (a.binding && !sameBinding(a.binding, s.processIdentity)) throw new Error('target process changed; retry unenrol');
-    const file = store.path('assignments', `${s.key}.json`);
-    atomic(file, { key: s.key, binding: s.processIdentity, id: null, role: null, rev: (a.rev || 0) + 1, assignedAt: now() });
+    const file = store.path('assignments', `${key(s.key)}.json`), a = readJson<any>(file, {});
+    if (found ? JSON.stringify(a) !== JSON.stringify(found.value) : a.binding && !sameBinding(a.binding, s.processIdentity)) throw new Error('target process changed; retry unenrol');
+    const registered = readJson<any>(store.path('sessions', `${s.key}.json`), {});
+    if (!sameBinding(registered.processIdentity, s.processIdentity) || staleBinding(s.processIdentity, options.alive || pidAlive, startReader(options))) {
+      if (existsSync(file)) unlinkSync(file);
+    } else {
+      atomic(file, { key: s.key, binding: s.processIdentity, id: null, role: null, rev: (a.rev || 0) + 1, assignedAt: now() });
+    }
     return { key: s.key, id: `S-${s.key}`, assigned: false };
   } finally { release(); }
 }

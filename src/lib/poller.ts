@@ -1,5 +1,6 @@
 import { readdirSync } from 'node:fs';
-import { ownerId } from './discovery.ts';
+import { ownerId, pruneAssignments } from './discovery.ts';
+import type { DiscoveryOptions } from './discovery.ts';
 import { gh } from './candidates.ts';
 import { overdue } from './decisions.ts';
 import { atomic, key, lock, now, readJson, Store } from './store.ts';
@@ -18,7 +19,8 @@ function recipientIds(store: Store): string[] {
 function notify(store: Store, to: string, kind: string, subject: string, body: string) {
   store.send({ from: 'L0', to, kind, subject, body, requiresAck: false, ackDeadlineMin: 30 });
 }
-export function pollOnce(store: Store, time = Date.now()) {
+export function pollOnce(store: Store, time = Date.now(), options: DiscoveryOptions = {}) {
+  pruneAssignments(store, options);
   const stateFile = store.path('poller-state.json');
   const state = readJson<any>(stateFile, { backoff: {}, staleDigestAt: 0 });
   const errors: string[] = [];
