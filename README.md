@@ -1,4 +1,4 @@
-# @woksin/pi-orch — lean MVP
+# @woksin/pi-orch — lean MVP + discovery
 
 Local, dependency-free Node 26 TypeScript package. Files + git + GitHub are truth; no
 ledger, terminal typing, automatic gates, auto-merge, or credential isolation.
@@ -10,25 +10,40 @@ Set these **before launching** pi/pi-session; wrapper relaunches retain them:
 
 | Variable | Meaning |
 |---|---|
-| `PI_ORCH_ID` | `L0`, `R-<Repo>` owner, or lane (e.g. `L3`). Unset: extension registers nothing. |
+| `PI_ORCH_ID` | `L0`, `R-<Repo>` owner, or lane (e.g. `L3`). Overrides live assignment when set; otherwise discovered sessions can be enrolled live. |
+| `PI_ORCH_OPTOUT` | `1` keeps the extension fully dormant, even under a configured root. |
 | `PI_REPO` | Repo key for owners/lanes, e.g. `Studio`. |
 | `ORCH_HOME` | Defaults to `/Volumes/sourcecode/repos/cratis/.ai-work/orch`. Tests always use a temporary home. |
 | `ORCH_NODE` | Optional executable override for bin scripts; default is the pilot's Node 26.8.1 absolute path. |
-| `PI_SESSION_WRAPPER_PID` | Optional pi-session-provided wrapper PID, recorded for continuity. |
+| `PI_SESSION_WRAPPER_PID` | pi-session wrapper PID: stable session key `w<PID>`; otherwise `p<host-pid>`. |
 
-Only the first UI session in a process delivers messages and writes heartbeats.
-Non-UI sessions and other session IDs stay passive, but still cannot publish.
-This guard is an accidental-publication barrier, **not a sandbox**. Existing
-extensions may block tools independently (notably context-budget during handoff).
+Activation requires cwd under a `config.json` root, not under an exclude, and no
+opt-out. This also applies to explicit PI_ORCH_ID. No config/roots means dormant.
+The session-start observer re-evaluates roots on new/resume, and re-pins every UI
+session ID. Outside roots: no registrations, deliveries, tools or blocking guards.
+In-process workers (`ctx.hasUI === false`) never write session/heartbeat files or
+deliver messages; assigned workers still cannot publish. This is an accidental-
+publication barrier, **not a sandbox**; existing extensions may block independently.
 
-The bus scans at session start, watches inbox, polls every 20s and heartbeats every
-30s. Messages use followUp delivery (idle starts a turn; streaming queues). A
-context-budget status file in `~/.pi/agent/context-budget/status/<sessionId>.json`
+Active sessions register by stable key, with tty, canonical cwd/git toplevel,
+origin slug, branch, current session ID, host and wrapper PID. Effective identity:
+env PI_ORCH_ID, else `assignments/<key>.json`, else `S-<key>` (unassigned). The bus
+watches assignments and reads them at each tool call; no restart/env mutation is
+needed. Both effective-id and stable-key inboxes are read. Unassigned sessions
+receive only ALL broadcasts and addressed orders, with **no publication/watch
+guards** except the configured phaseWindow. Assignment starts lane/owner guards.
+
+The bus scans at session start/agent_end, watches inboxes/assignments, polls every
+20s and heartbeats every 30s. followUp delivery starts an idle turn or queues while
+streaming. Context-budget `~/.pi/agent/context-budget/status/<sessionId>.json`
 defers delivery during active handoff; missing/unreadable status permits delivery.
-Receipts are durable. Delivery is at-least-once across a crash between send and
-receipt, not exactly-once. One deadline reminder; poller escalates after +15 min.
-L0 receives questions/escalations/idle and ack-required reports immediately; other
-messages are combined at most once per ten minutes (digest time persists).
+Receipts are claimed **before** send: each delivery/reminder is at-most-once, so a
+send throw or crash cannot cause turn spam. A crash between claim and send can
+lose that wake; pi offers no transaction with the filesystem. Outstanding acks
+remain visible and can remind/escalate. One deadline reminder; escalation after
++15min. L0 questions/escalations/idle and ack-required reports are immediate; other
+messages form at most one digest per ten minutes (throttle survives restarts).
+Shutdown closes watchers/timers and removes only the session's own heartbeat.
 
 Tools: `order_ack {id,plan}`, `order_decline {id,reason}`,
 `order_done {id,evidence}`, `orch_send {to,kind,subject,body,requiresAck?,deadlineMin?}`,
@@ -36,11 +51,29 @@ Tools: `order_ack {id,plan}`, `order_decline {id,reason}`,
 use registered sessions). Default acknowledgment false, deadline 30 minutes.
 
 Lane/worker bash and job command/check fields deny git push, gh pr
-create/merge/ready/close, gh release, gh workflow run. Owner holds deny only their
+create/merge/ready/close, gh release, gh workflow run, and orch cand push/land/rebuild. Owner holds deny only their
 listed push/pr-create/pr-merge operations. Everyone must use orch_status instead
-of gh run watch / gh pr checks --watch. No changing system prompt.
+of gh run watch / gh pr checks --watch. CLI push/land/rebuild enforce the same role/hold checks using env or wrapper/registered-ancestor assignment. Standalone/unassigned callers retain operator access. gh api writes remain advisory/unparsed; this is not credential isolation. The role note is sent once per session/role revision, never each turn or in workers.
 
 ## ORCH_HOME
+
+`config.json` controls discovery and optional temporary phase admission:
+
+```json
+{
+  "roots": ["/Volumes/sourcecode/repos/cratis"],
+  "excludes": ["/Volumes/sourcecode/repos/Mesta"],
+  "phaseWindow": {
+    "until": "2026-10-22T12:00:00Z",
+    "requirePriority": "low",
+    "exempt": ["L0"]
+  }
+}
+```
+
+Omit phaseWindow when unused. While active, assigned and unassigned sessions must
+use `pi-phase run --priority low`; expired/exempt windows do not block. Paths use
+realpaths, including symlinks and macOS /var vs /private/var aliases.
 
 `repos.json` is an operator-edited mapping of repo keys to config, for example:
 
@@ -58,22 +91,26 @@ of gh run watch / gh pr checks --watch. No changing system prompt.
 }
 ```
 
-- `sessions/<id>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt.
-- `heartbeats/<id>.json`: overwritten liveness/state, last turn end, unacked IDs.
+- `assignments/<key>.json`: `{key,id,role,repo,assignedAt,by,rev}`, written by enrol, removed by unenrol.
+- `sessions/<key>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt.
+- `heartbeats/<key>.json`: overwritten liveness/state, last turn end, unacked IDs.
 - `inbox/<id>/<msgId>.json`: immutable message; ID `yyyymmddThhmmss-from-xxxx`.
 - `receipts/<id>/<msgId>.<state>.json`: immutable delivered/acked/declined/done/reminded/escalated transitions.
 - `deliveries/<Repo>/<dId>.json`: immutable delivery with issue/branch/SHA/deps/notes/intent/gate log.
 - `deliveries/<Repo>/<dId>.status.<n>.json`: append-only status; highest number wins.
 - `cands/<Repo>/<name>.json`: candidate; members freeze at build, head advances only via sync.
 - `gh/<Repo>.json`: overwritten poller cache, `at` and `prs` (state/head/CI).
-- `bus/<id>.digest.json`, `poller-state.json`: digest/backoff timestamps.
+- `bus/<key>.digest.json`, `poller-state.json`: digest/backoff timestamps.
 - `locks/<Repo>.lock`, `poller.lock`, transient `*.lock` and `*.tmp`: exclusive locks/atomic writes.
 
-No lock is stolen on PID/age assumptions. After a crash, inspect for live owners
-before an operator removes a stale lock. Git integration worktrees are locked and
-retained. Express uses `<integrationWorktree>-express` and daily admission limits.
-Candidate manifests additionally record gateSha (evidence binding) and, on rebuild,
-supersededBy. Holds are ordered repo/block events, not cleared by acknowledgment.
+Mutable writes use tmp+rename; immutable facts use tmp+hard-link (concurrent
+writers cannot overwrite a fact). They do not acquire per-file locks. Remaining
+repo/status/poller/enrol leases contain pid/time/token; dead PID or lease mtime
+older than 60s is recoverable. Timers renew every 15s and bounded git/gh calls
+renew on entry/exit. Release checks its token before unlinking. Git integration
+worktrees stay locked and retained; express uses `<integrationWorktree>-express`.
+Candidate manifests record gate snapshot metadata and supersededBy on rebuild.
+Holds remain repo/block-scoped events, not cleared by acknowledgments.
 
 ## CLI
 
@@ -87,6 +124,11 @@ orch send R-Studio --kind order --subject 'Next batch' --ack --deadline 30 --bod
 # Without --body-file, body comes from stdin. Sender PI_ORCH_ID, or operator L0.
 orch send R-Studio --kind hold --subject 'Pause' --repo Studio --blocks push,pr-merge --body-file hold.txt
 # release uses same repo and blocks. Kinds: order/info/question/report/idle/rule/hold/release/ci/escalation.
+orch sessions [--json] [--all]
+orch enrol w12345 --id L3 --role lane --repo Studio [--rules-file rules.txt]
+# Target may also be an unambiguous tty, e.g. ttys003 or /dev/ttys003.
+orch unenrol w12345   # or assigned id
+orch owners
 orch board [--json]
 orch deliver --repo Studio --branch d/fix --issue 123 --notes-file notes.json --intent patch --gate-log gate.log \
   [--sha SHA] [--deps id1,id2] [--paths src/a src/b]
@@ -105,8 +147,8 @@ orch-poll [--once]
 Notes input is a nonempty JSON array, for example
 `[{"section":"Fixed","bullets":["Corrected navigation (#123)"]}]`.
 Sections: Added, Changed, Fixed, Removed, Security, Deprecated (that output order).
-Intents: no-release, patch, minor, major. PR label is `release:<max-intent>`;
-major is refused with "park for woksin". Notes preserves bullet references and
+Intents: no-release, patch, minor, major. PR label is the plain max intent (`patch`, `minor`, `no-release`);
+major is refused with "park for woksin". Every bullet must be single-line with a bare `(#n)` reference; Closes/Fixes/Refs directives are rejected. Only nonempty ordered `##` release-note sections are emitted (no issue-closing lines). Notes preserves references and
 writes `<integrationWorktree>/.ai-work/cand-<NAME>-body.md`.
 
 Deliver validates a local branch and tip/ancestor SHA, notes and a gate log whose
@@ -118,34 +160,50 @@ Names use UTC minute plus a collision suffix when necessary.
 
 Build prints gateCmd but **does not run it**. Owner runs the repo's gate using
 job_start/pi-phase in the integration worktree, then registers evidence at the
-recorded head. Capture the **runner output**, not just its producer-only --log:
+recorded head. Candidate gate evidence requires a **new log path**, strictly newer
+than the last build/sync, never a delivery log or previous gate path. Registration
+verifies integration HEAD equals headSha and snapshots canonical path, mtime, size,
+SHA-256 and HEAD. Push/land verify that unchanged snapshot; sync invalidates it.
+Old manifests need a new gate. This is cooperative evidence, not tamper isolation.
+Capture the **runner output**, not just its producer-only --log:
 
 ```sh
-pi-phase run --kind build --label candidate-gate --timeout 300 --queue-timeout 300 -- YOUR_GATE > gate.log 2>&1
-orch cand gate --repo Studio --cand NAME --log /absolute/gate.log
+pi-phase run --kind build --priority low --label candidate-gate --timeout 300 --queue-timeout 300 -- YOUR_GATE > gate-NAME-1.log 2>&1
+orch cand gate --repo Studio --cand NAME --log /absolute/gate-NAME-1.log
 ```
 
 Sync records owner fixes, refuses merges importing nonmember deliveries, and
 invalidates prior gate evidence. Push requires current branch/head and valid gate;
-it creates one PR with body, label and assignee woksin, later only pushes.
-Land requires cached OPEN PR, matching head and all checks successful; uses
-`gh pr merge --merge`, never admin/auto. Run owners' `orch reconcile` at session
+it pushes explicit `headSha:refs/heads/<branch>` and creates one PR with body, plain intent label and assignee woksin (no reviewer), later only pushes.
+Land requires bound gate evidence, cache <=5min old, OPEN non-draft/non-major PR, matching head and all checks successful; uses
+`gh pr merge <n> --merge --match-head-commit <headSha>`, never admin/auto. Run owners' `orch reconcile` at session
 start and after interrupted operations to recover PR/status truth idempotently.
 Rebuild never reverts: build anew minus drops/dependents, then close the old
 unmerged PR with a link to the replacement candidate **branch** (no new PR exists
 until its gate/push). Candidate build/gate alone do not mark members in-cand;
-push does. Closed unmerged PRs reconcile back to pending unless superseded.
+push does. Already superseded candidates cannot be rebuilt again, and in-cand deliveries cannot enter a different batch. Unknown cand branches are reconstructed without baseline/shipped deliveries. Closed unmerged PRs reconcile back to pending unless superseded.
 
 ## Poller and pilot installation (operator steps — not performed here)
 
 1. Add `"./local-packages/pi-orch"` to `packages` in `~/.pi/agent/settings.json`.
 2. Add this package's `bin/` to PATH (or create operator-managed symlinks).
-3. Create/edit ORCH_HOME/repos.json, checking absolute paths and batch rules.
-4. Set role/repo/home before launching the pilot's pi-session. Owners reconcile
-   at each session start. Do not enable this in an existing live session.
+3. Create/edit ORCH_HOME/config.json and repos.json, checking roots/excludes, paths and batch rules.
+4. Set ORCH_HOME before launching pi-session. Roles may be pinned by env or assigned
+   live using sessions/enrol; owners reconcile at each session start. Enable the
+   installed extension only in an operator-controlled new/reloaded session.
 5. Review `docs/com.woksin.orch-poll.plist`, replace paths/home/log locations and
    manually install/bootstrap it with launchd when ready. Package/tests never run
    launchctl. Only one poller should target an ORCH_HOME.
+
+Live enrolment: `sessions` lists registrations; `--all` also reads uninstrumented
+pi processes via pgrep/ps/lsof cwd, and attaches cached open PRs matching branches.
+Discovery is injectable for tests. Uninstrumented processes can be assigned, but
+cannot deliver until this extension is actually installed and active. `enrol`
+writes the assignment and an ack-required rules message to the stable-key inbox;
+`unenrol` returns to S-<key>. Env-pinned identities cannot be overridden this way.
+`owners` shows live repo owners, session IDs and heartbeat ages. A live owner has a
+heartbeat <=90s old and a live host OR wrapper PID. Two live owners for one repo
+are refused: demote/unenrol the old owner before promoting its replacement.
 
 Each 120s tick performs one open-PR list per enrolled repo, plus one view for a
 candidate PR newly missing from the open list. Cache CI transitions SUCCESS,
@@ -168,4 +226,4 @@ PATH. Unit tests exercise pure decisions without pi, and a fake-pi factory test
 verifies dormant/active loading without any live session or model request. Git
 integration cases run in this same suite. `test/check.ts` syntax-checks all TS and
 rejects trailing whitespace; there is no compiler/linter dependency or CI workflow.
-Use pi-phase for both checks under agent execution policy.
+Use pi-phase for both checks under agent execution policy. Regression tests explicitly place worktree aliases in native OS temporary paths, so managed-output paths cannot mask macOS realpath failures. The native package has no configured CI workflow or compiler build gate; local git/fake-gh integrations do not replace live pilot verification.
