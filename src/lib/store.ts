@@ -27,8 +27,10 @@ export function readJson<T>(file: string, fallback?: T): T {
 }
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (e: any) { return e.code !== 'ESRCH'; }
+  try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; }
 }
+const leases = new Set<() => void>();
+export const renewLocks = () => { for (const renew of leases) renew(); };
 export function lock(file: string): () => void {
   mkdirSync(dirname(file), { recursive: true });
   let fd: number;
@@ -46,10 +48,11 @@ export function lock(file: string): () => void {
   }
   const token = randomBytes(16).toString('hex');
   writeFileSync(fd, JSON.stringify({ pid: process.pid, at: now(), token }));
-  const renew = setInterval(() => { try { const t = new Date(); futimesSync(fd, t, t); } catch { /* Release/exit owns cleanup. */ } }, 15000);
-  renew.unref();
+  const refresh = () => { try { const t = new Date(); futimesSync(fd, t, t); } catch { /* Release/exit owns cleanup. */ } };
+  leases.add(refresh);
+  const renew = setInterval(refresh, 15000); renew.unref();
   return () => {
-    clearInterval(renew); closeSync(fd);
+    clearInterval(renew); leases.delete(refresh); closeSync(fd);
     try { if (readJson<any>(file).token === token) unlinkSync(file); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
   };
 }
@@ -98,7 +101,7 @@ export class Store {
       ? sessions.filter(s => input.to === 'ALL' || s.kind === (input.to === 'owners' ? 'owner' : 'lane')).map(s => s.key || s.id)
       : [key(input.to)];
     return [...new Set<string>(recipients)].map(to => {
-      const message = { ...input, to, id: factId(input.from), createdAt: now() };
+      const message = { ...input, ...(['ALL', 'owners', 'lanes'].includes(input.to) ? { refs: { ...input.refs, broadcast: input.to } } : {}), to, id: factId(input.from), createdAt: now() };
       atomic(this.path('inbox', to, `${message.id}.json`), message, true);
       return message;
     });

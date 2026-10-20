@@ -4,16 +4,20 @@ export const intents = ['no-release', 'patch', 'minor', 'major'];
 export function parseNotes(text: string): Note[] {
   const notes = JSON.parse(text);
   if (!Array.isArray(notes) || !notes.length || notes.some(n => !sections.includes(n.section) || !Array.isArray(n.bullets) || !n.bullets.length || n.bullets.some((b: unknown) => typeof b !== 'string' || !b.trim()))) throw new Error('notes must be a nonempty JSON array of {section, bullets}');
+  for (const n of notes) for (const b of n.bullets) {
+    if (/[\r\n]/.test(b) || !/\(#\d+\)/.test(b) || /\b(?:close[sd]?|fix(?:e[sd])?|refs?)\s*:?\s+#\d+/i.test(b)) throw new Error('notes require bare (#n) references, single-line bullets, and no Closes/Fixes/Refs lines');
+  }
   return notes;
 }
 export function composeNotes(deliveries: Delivery[]) {
+  deliveries.forEach(d => parseNotes(JSON.stringify(d.notes)));
   const intent = intents[Math.max(0, ...deliveries.map(d => intents.indexOf(d.intent)))];
   if (intent === 'major') throw new Error('park for woksin');
   const body = sections.map(s => {
     const bullets = deliveries.flatMap(d => d.notes.filter(n => n.section === s).flatMap(n => n.bullets));
     return bullets.length ? `## ${s}\n${bullets.map(b => `- ${b}`).join('\n')}` : '';
   }).filter(Boolean).join('\n\n') + '\n';
-  return { body, label: `release:${intent}` };
+  return { body, label: intent };
 }
 export function dependencyOrder(all: Delivery[], ids: string[], satisfied: string[] = []): Delivery[] {
   const ordered: Delivery[] = [], visiting = new Set<string>(), visited = new Set(satisfied);
@@ -89,12 +93,12 @@ function executableWords(words: string[]): string[] {
   let i = 0;
   while (i < words.length) {
     const word = words[i], name = word.split('/').at(-1);
-    if (/^[A-Za-z_][\w]*=/.test(word)) { i++; continue; }
-    if (['env', 'sudo', 'command', 'exec', 'nohup', 'time', 'timeout'].includes(name!)) {
+    if (['{', '}', 'then', 'do', 'else', '!', 'if', 'while', 'until'].includes(word) || /^[A-Za-z_][\w]*=/.test(word)) { i++; continue; }
+    if (['env', 'sudo', 'command', 'exec', 'nohup', 'time', 'timeout', 'xargs', 'nice', 'npx'].includes(name!)) {
       i++;
       while (words[i]?.startsWith('-')) {
         const flag = words[i++];
-        if (['-u', '--unset', '-C', '--chdir', '-g', '--group', '--user', '-s', '--signal', '-k', '--kill-after'].includes(flag)) i++;
+        if (['-u', '--unset', '-C', '--chdir', '-g', '--group', '--user', '-s', '--signal', '-k', '--kill-after', '-n', '--adjustment', '-I', '-L', '-P', '--max-args', '--max-procs', '--replace', '--package', '-p'].includes(flag)) i++;
       }
       if (name === 'timeout') i++;
       continue;
@@ -103,26 +107,43 @@ function executableWords(words: string[]): string[] {
   }
   return words.slice(i);
 }
-function operation(raw: string[]): string | undefined {
+function operation(raw: string[]): string[] {
   const words = executableWords(raw);
   let i = 0;
   const binary = words[i++]?.split('/').at(-1);
-  if (!['git', 'gh'].includes(binary!)) return;
+  if (binary === 'orch') {
+    if (words[1] !== 'cand') return [];
+    return ({ push: ['push', 'pr-create'], land: ['pr-merge'], rebuild: ['pr-close'] } as Record<string, string[]>)[words[2]] || [];
+  }
+  if (!['git', 'gh'].includes(binary!)) return [];
   while (words[i]?.startsWith('-')) {
     const flag = words[i++];
     if (['-C', '-c', '--git-dir', '--work-tree', '--repo', '-R', '--hostname'].includes(flag)) i++;
   }
-  if (binary === 'git') return words[i] === 'push' ? 'push' : undefined;
+  if (binary === 'git') return words[i] === 'push' ? ['push'] : [];
   const args = words.slice(i);
-  if (args[0] === 'run' && args[1] === 'watch' || args[0] === 'pr' && args[1] === 'checks' && args.some(a => a === '--watch' || a.startsWith('--watch='))) return 'watch';
-  if (args[0] === 'pr' && ['create', 'merge', 'ready', 'close'].includes(args[1])) return `pr-${args[1]}`;
-  if (args[0] === 'release' || args[0] === 'workflow' && args[1] === 'run') return 'publish';
+  if (args[0] === 'run' && args[1] === 'watch' || args[0] === 'pr' && args[1] === 'checks' && args.some(a => a === '--watch' || a.startsWith('--watch='))) return ['watch'];
+  if (args[0] === 'pr' && ['create', 'merge', 'ready', 'close'].includes(args[1])) return [`pr-${args[1]}`];
+  if (args[0] === 'release' || args[0] === 'workflow' && args[1] === 'run') return ['publish'];
+  return [];
 }
 export function guard(command: string, kind: string, primary: boolean, repo: string | undefined, active: Block[]) {
   for (const words of commands(command)) {
-    const op = operation(words);
-    if (op === 'watch') return 'use orch_status; orch-poll wakes you';
-    if (op && (kind === 'lane' || !primary)) return `deliver to R-${repo || '<repo>'}: orch deliver ...`;
-    if (kind === 'owner' && active.includes(op as Block)) return `hold for ${repo}: ${op} blocked`;
+    for (const op of operation(words)) {
+      if (op === 'watch') return 'use orch_status; orch-poll wakes you';
+      if (op && (kind === 'lane' || !primary)) return `deliver to R-${repo || '<repo>'}: orch deliver ...`;
+      if (kind === 'owner' && active.includes(op as Block)) return `hold for ${repo}: ${op} blocked`;
+    }
+  }
+}
+
+export function phaseGuard(command: string, window: { until: string; requirePriority: 'low'; exempt?: string[] } | undefined, id: string, time = Date.now()) {
+  if (!window || Date.parse(window.until) <= time || !Number.isFinite(Date.parse(window.until)) || window.exempt?.includes(id)) return;
+  for (const raw of commands(command)) {
+    const words = executableWords(raw);
+    if (words[0]?.split('/').at(-1) !== 'pi-phase' || words[1] !== 'run') continue;
+    const flags = words.slice(2, words.indexOf('--') >= 0 ? words.indexOf('--') : undefined);
+    const priorities = flags.flatMap((w, i) => w === '--priority' ? [flags[i + 1]] : w.startsWith('--priority=') ? [w.slice(11)] : []);
+    if (priorities.length !== 1 || priorities[0] !== 'low') return `phaseWindow until ${window.until}: use pi-phase run --priority low`;
   }
 }
