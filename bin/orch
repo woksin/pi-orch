@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${ORCH_NODE:-/Users/sindrewilting/.nvm/versions/node/v26.8.1/bin/node}" "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/src/cli/main.ts" "$@"
