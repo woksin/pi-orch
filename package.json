@@ -1,0 +1,12 @@
+{
+  "name": "@woksin/pi-orch",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Repo-owner orchestration for multi-session pi: order bus, ledger, shared GitHub poller, batched candidate PRs",
+  "license": "MIT",
+  "author": "woksin",
+  "type": "module",
+  "scripts": { "test": "node --test --test-timeout=30000 'test/*.test.ts'" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+  "pi": { "extensions": ["./src/extension/lane-bus.ts"] }
+}

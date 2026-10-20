@@ -1,0 +1,5 @@
+node_modules/
+.ai-work/
+*.db
+*.db-wal
+*.db-shm
