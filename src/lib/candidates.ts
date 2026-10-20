@@ -1,14 +1,19 @@
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { cliIdentity, ownerId } from './discovery.ts';
+import { canonical } from './paths.ts';
 import { composeNotes, dependencyOrder, dependents, freezeSet, intents, parseNotes } from './decisions.ts';
-import { atomic, factId, key, now, readJson, Store } from './store.ts';
+import { atomic, factId, key, now, readJson, renewLocks, Store } from './store.ts';
 import type { Candidate, Delivery, Repo } from './store.ts';
 
 export class OrchError extends Error { code: number; constructor(message: string, code = 2) { super(message); this.code = code; } }
 export function run(command: string, args: string[], cwd?: string): string {
+  renewLocks();
   try { return execFileSync(command, args, { cwd, encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
   catch (e: any) { throw new OrchError(`${command} ${args.slice(0, 3).join(' ')}: ${e.stderr?.toString().trim() || e.message}`); }
+  finally { renewLocks(); }
 }
 export const git = (cwd: string, ...args: string[]) => run('git', ['-C', cwd, ...args]);
 export const gh = (repo: Repo, ...args: string[]) => run('gh', [...args, '--repo', repo.slug]);
@@ -31,10 +36,11 @@ export function deliver(store: Store, p: { repo: string; branch: string; issue: 
   const notes = parseNotes(readFileSync(p.notesFile, 'utf8'));
   const deps = p.deps || [];
   for (const id of deps) if (!store.deliveries(p.repo).some(d => d.id === id)) throw new OrchError(`missing dependency: ${id}`);
-  const d: Delivery = { id: factId(process.env.PI_ORCH_ID || 'L0'), repo: p.repo, issue: Number(p.issue), branch: p.branch, sha, author: process.env.PI_ORCH_ID || 'L0', createdAt: now(), deps, gateLog: resolve(p.gateLog), notes, intent: p.intent, ...(p.paths ? { paths: p.paths } : {}) };
+  const actor = cliIdentity(store), author = actor.assigned ? actor.id : 'L0';
+  const d: Delivery = { id: factId(author), repo: p.repo, issue: Number(p.issue), branch: p.branch, sha, author, createdAt: now(), deps, gateLog: canonical(p.gateLog), notes, intent: p.intent, ...(p.paths ? { paths: p.paths } : {}) };
   atomic(store.path('deliveries', key(p.repo), `${d.id}.json`), d, true);
   store.appendStatus(p.repo, d.id, { state: 'pending' });
-  store.send({ from: d.author, to: `R-${p.repo}`, kind: 'info', subject: `Delivery ${d.id}`, body: `${d.branch} ${sha} (#${d.issue})`, requiresAck: false, ackDeadlineMin: 30 });
+  store.send({ from: d.author, to: ownerId(store, p.repo), kind: 'info', subject: `Delivery ${d.id}`, body: `${d.branch} ${sha} (#${d.issue})`, requiresAck: false, ackDeadlineMin: 30 });
   return d;
 }
 export function plan(store: Store, repo: string) {
@@ -58,12 +64,13 @@ export function build(store: Store, repo: string, ids: string[], express = false
   const ordered = dependencyOrder(all, ids, shipped);
   if (ids.some(id => !all.some(d => d.id === id) || shipped.includes(id))) throw new OrchError('ids must name unshipped deliveries');
   if (ordered.some(d => !ids.includes(d.id))) throw new OrchError('ids must include dependency closure');
+  if (ordered.some(d => { const status = store.status(repo, d.id); return status?.state === 'in-cand' && status.cand !== replacing; })) throw new OrchError('delivery already in another candidate');
   const cwd = worktree(r, { express });
   if (existsSync(cwd)) clean(cwd);
   git(r.mainCheckout, 'fetch', 'origin');
   if (!existsSync(cwd)) git(r.mainCheckout, 'worktree', 'add', '--detach', cwd, 'origin/main');
   const listed = git(r.mainCheckout, 'worktree', 'list', '--porcelain');
-  const entry = listed.split('\n\n').find(e => e.startsWith(`worktree ${resolve(cwd)}\n`));
+  const entry = listed.split('\n\n').find(e => { const path = e.split('\n')[0].replace(/^worktree /, ''); return canonical(path) === canonical(cwd); });
   if (!entry) throw new OrchError(`not an integration worktree: ${cwd}`);
   if (!entry.split('\n').some(l => l === 'locked' || l.startsWith('locked '))) git(r.mainCheckout, 'worktree', 'lock', cwd);
   const stamp = now().replace(/[-:]/g, '').replace('T', '-').slice(0, 13);
@@ -82,7 +89,7 @@ export function build(store: Store, repo: string, ids: string[], express = false
       bounced.push({ dId: d.id, reason: 'conflict' }); store.appendStatus(repo, d.id, { state: 'bounced', cand: name, reason: 'conflict' });
     }
   }
-  const c: Candidate = { name, repo, base, branch, createdAt: now(), members, bounced, express, headSha: git(cwd, 'rev-parse', 'HEAD') };
+  const c: Candidate = { name, repo, base, branch, createdAt: now(), members, bounced, express, headSha: git(cwd, 'rev-parse', 'HEAD'), evidenceAfter: now() };
   store.saveCandidate(c); return c;
 }
 export function sync(store: Store, repo: string, name: string) {
@@ -94,27 +101,39 @@ export function sync(store: Store, repo: string, name: string) {
   const parents = git(cwd, 'rev-list', '--merges', '--parents', `${c.headSha}..${head}`).split('\n').flatMap(l => l.split(' ').slice(2));
   const excluded = store.deliveries(repo).filter(d => !c.members.includes(d.id));
   if (parents.some(parent => excluded.some(d => d.sha === parent || ancestry(cwd, d.sha, parent) && !ancestry(cwd, d.sha, c.headSha)))) throw new OrchError('new merge parent contains delivery not in members');
-  c.headSha = head; delete c.gateLog; delete c.gateSha; store.saveCandidate(c); return c;
+  c.headSha = head; c.evidenceAfter = now(); c.lastGateLog = c.gateLog || c.lastGateLog; delete c.gateLog; delete c.gateSha; delete c.gateMtimeMs; delete c.gateSize; delete c.gateDigest; store.saveCandidate(c); return c;
+}
+const logDigest = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
+function evidence(c: Candidate) {
+  if (!c.gateLog || c.gateSha !== c.headSha || !c.gateDigest) throw new OrchError('gate evidence required at current headSha');
+  const stat = statSync(c.gateLog);
+  if (stat.mtimeMs !== c.gateMtimeMs || stat.size !== c.gateSize || logDigest(c.gateLog) !== c.gateDigest || stat.mtimeMs <= Date.parse(c.evidenceAfter || c.createdAt)) throw new OrchError('gate evidence changed or predates candidate head');
+  successLog(c.gateLog);
 }
 export function gate(store: Store, repo: string, name: string, log: string) {
-  const c = store.candidate(repo, name); assertHead(store.repo(repo), c); successLog(log);
-  c.gateLog = resolve(log); c.gateSha = c.headSha; store.saveCandidate(c); return c;
+  const c = store.candidate(repo, name); assertHead(store.repo(repo), c);
+  const file = canonical(log), stat = statSync(file);
+  if ([c.gateLog, c.lastGateLog, ...store.deliveries(repo).map(d => d.gateLog)].filter(Boolean).some(p => canonical(p!) === file)) throw new OrchError('gate log path was already used; produce a new candidate log');
+  if (stat.mtimeMs <= Date.parse(c.evidenceAfter || c.createdAt)) throw new OrchError('gate log must be newer than candidate build/sync');
+  successLog(file);
+  c.gateLog = file; c.gateSha = c.headSha; c.gateMtimeMs = stat.mtimeMs; c.gateSize = stat.size; c.gateDigest = logDigest(file);
+  store.saveCandidate(c); return c;
 }
 export function notes(store: Store, repo: string, name: string) {
   const c = store.candidate(repo, name), r = store.repo(repo);
   const selected = c.members.map(id => { const d = store.deliveries(repo).find(d => d.id === id); if (!d) throw new OrchError(`missing delivery: ${id}`); return d; });
   const composed = composeNotes(selected), file = join(worktree(r, c), '.ai-work', `cand-${key(name)}-body.md`);
   mkdirSync(join(worktree(r, c), '.ai-work'), { recursive: true }); writeFileSync(file, composed.body);
-  return { ...composed, file };
+  const title = selected.flatMap(d => d.notes.flatMap(n => n.bullets))[0]?.replace(/\s*\(#\d+\)/g, '').slice(0, 120) || `Candidate ${c.name}`;
+  return { ...composed, file, title };
 }
 export function push(store: Store, repo: string, name: string) {
   const c = store.candidate(repo, name), r = store.repo(repo), cwd = assertHead(r, c);
-  if (!c.gateLog || c.gateSha !== c.headSha) throw new OrchError('gate evidence required at current headSha');
-  successLog(c.gateLog);
+  evidence(c);
   const body = notes(store, repo, name);
-  git(cwd, 'push', 'origin', c.branch);
+  git(cwd, 'push', 'origin', `${c.headSha}:refs/heads/${c.branch}`);
   if (!c.pr) {
-    const url = gh(r, 'pr', 'create', '--head', c.branch, '--base', 'main', '--title', `Candidate ${c.name}`, '--body-file', body.file, '--label', body.label, '--assignee', 'woksin');
+    const url = gh(r, 'pr', 'create', '--head', c.branch, '--base', 'main', '--title', body.title, '--body-file', body.file, '--label', body.label, '--assignee', 'woksin');
     const match = url.match(/\/pull\/(\d+)\s*$/); if (!match) throw new OrchError('gh pr create did not return a PR URL; run orch reconcile');
     c.pr = Number(match[1]); store.saveCandidate(c);
   }
@@ -123,16 +142,20 @@ export function push(store: Store, repo: string, name: string) {
 }
 export function land(store: Store, repo: string, name: string) {
   const c = store.candidate(repo, name), r = store.repo(repo);
+  evidence(c);
   const cache = readJson<any>(store.path('gh', `${key(repo)}.json`), {});
+  if (!Number.isFinite(Date.parse(cache.at)) || Date.now() - Date.parse(cache.at) > 300000) throw new OrchError('gh cache is missing or stale (max 5 minutes)');
   const pr = cache.prs?.find((p: any) => p.number === c.pr);
   if (!pr || pr.state !== 'OPEN' || pr.headRefOid !== c.headSha || pr.ci !== 'SUCCESS') throw new OrchError('gh cache requires PR open, head == headSha, all checks success');
-  gh(r, 'pr', 'merge', String(c.pr), '--merge');
+  if (pr.isDraft !== false || !Array.isArray(pr.labels) || pr.labels.some((l: any) => (typeof l === 'string' ? l : l.name) === 'major')) throw new OrchError('cannot land draft or major-labelled PR (or missing metadata)');
+  gh(r, 'pr', 'merge', String(c.pr), '--merge', '--match-head-commit', c.headSha);
   c.landedAt = now(); store.saveCandidate(c);
   for (const id of c.members) store.appendStatus(repo, id, { state: 'shipped', cand: name, pr: c.pr });
   return c;
 }
 export function rebuild(store: Store, repo: string, name: string, drop: string[]) {
   const old = store.candidate(repo, name), r = store.repo(repo);
+  if (old.supersededBy) throw new OrchError(`candidate already superseded by ${old.supersededBy}`);
   if (!drop.length || drop.some(id => !old.members.includes(id))) throw new OrchError('drop must name candidate members');
   let state = '';
   if (old.pr) { state = JSON.parse(gh(r, 'pr', 'view', String(old.pr), '--json', 'state')).state; if (state === 'MERGED') throw new OrchError('cannot rebuild merged candidate'); }
@@ -155,12 +178,15 @@ export function reconcile(store: Store, repo: string) {
   for (const branch of branches) {
     const name = branch.slice(5); if (!name.startsWith(`${repo}-`) || store.candidates(repo).some(c => c.name === name)) continue;
     const headSha = git(r.mainCheckout, 'rev-parse', branch);
-    const members = store.deliveries(repo).filter(d => ancestry(r.mainCheckout, d.sha, headSha)).map(d => d.id);
-    store.saveCandidate({ name, repo, branch, headSha, base: git(r.mainCheckout, 'merge-base', 'origin/main', headSha), createdAt: now(), members, bounced: [], express: false });
+    const base = git(r.mainCheckout, 'merge-base', 'origin/main', headSha);
+    const members = store.deliveries(repo).filter(d => store.status(repo, d.id)?.state !== 'shipped' && ancestry(r.mainCheckout, d.sha, headSha) && !ancestry(r.mainCheckout, d.sha, base)).map(d => d.id);
+    store.saveCandidate({ name, repo, branch, headSha, base, createdAt: now(), members, bounced: [], express: false });
   }
   for (const c of store.candidates(repo)) {
+    if (c.supersededBy) continue;
     let pr: any;
-    if (c.pr) pr = JSON.parse(gh(r, 'pr', 'view', String(c.pr), '--json', 'number,state,mergedAt,headRefOid'));
+    if (c.landedAt && c.pr) pr = { number: c.pr, state: 'MERGED', mergedAt: c.landedAt };
+    else if (c.pr) pr = JSON.parse(gh(r, 'pr', 'view', String(c.pr), '--json', 'number,state,mergedAt,headRefOid'));
     else {
       const prs = JSON.parse(gh(r, 'pr', 'list', '--head', c.branch, '--state', 'all', '--json', 'number,state,mergedAt,headRefOid'));
       pr = prs[0];

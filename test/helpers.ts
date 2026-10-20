@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomic, Store } from '../src/lib/store.ts';
@@ -26,5 +26,12 @@ export function fixture() {
     branch(name, path, body, base);
     return deliver(store, { repo: 'Test', branch: name, issue: '1', notesFile, intent: 'patch', gateLog, deps });
   };
-  return { root, main, origin, store, integration, gateLog, notesFile, ghData, ghCalls, branch, delivery, restore: () => { process.env.PATH = oldPath; } };
+  let logCounter = 0;
+  const candidateLog = (name: string) => {
+    const c = store.candidate('Test', name), log = join(root, `${name}-${++logCounter}.log`);
+    writeFileSync(log, `candidate ${c.headSha}\npi-phase: exit=0\n`);
+    const at = new Date(Math.max(Date.now(), Date.parse(c.evidenceAfter || c.createdAt) + 1)); utimesSync(log, at, at);
+    return log;
+  };
+  return { candidateLog, root, main, origin, store, integration, gateLog, notesFile, ghData, ghCalls, branch, delivery, restore: () => { process.env.PATH = oldPath; } };
 }
