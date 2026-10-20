@@ -1,4 +1,5 @@
 import { readdirSync } from 'node:fs';
+import { ownerId } from './discovery.ts';
 import { gh } from './candidates.ts';
 import { overdue } from './decisions.ts';
 import { atomic, key, lock, now, readJson, Store } from './store.ts';
@@ -37,15 +38,14 @@ export function pollOnce(store: Store, time = Date.now()) {
       }
       for (const c of store.candidates(repo)) {
         const p = prs.find((p: any) => p.number === c.pr), old = previous.prs.find((p: any) => p.number === c.pr);
-        if (p && p.ci !== old?.ci && ['SUCCESS', 'FAILURE', 'MERGED'].includes(p.ci)) notify(store, `R-${repo}`, 'ci', `${c.name}: ${p.ci}`, `PR #${p.number} at ${p.headRefOid}: ${p.ci}`);
+        if (p && p.ci !== old?.ci && ['SUCCESS', 'FAILURE', 'MERGED'].includes(p.ci)) notify(store, ownerId(store, repo), 'ci', `${c.name}: ${p.ci}`, `PR #${p.number} at ${p.headRefOid}: ${p.ci}`);
       }
       atomic(file, { at: new Date(time).toISOString(), prs }); delete state.backoff[repo];
     } catch (e: any) { errors.push(`${repo}: ${e.message}`); if (/\b(?:403|429)\b/.test(e.message)) state.backoff[repo] = time + 600000; }
   }
   for (const id of recipientIds(store)) for (const m of store.unacked(id)) {
-    if (overdue(m, time, 15) && !store.has(id, m.id, 'escalated')) {
+    if (overdue(m, time, 15) && store.record(id, m.id, 'escalated')) {
       notify(store, 'L0', 'escalation', `Unacknowledged: ${id} · ${m.subject}`, `${m.id} from ${m.from} is past deadline + 15 minutes.`);
-      store.record(id, m.id, 'escalated');
     }
   }
   const stale = store.list<any>('heartbeats').filter(h => time - Date.parse(h.at) > 600000);

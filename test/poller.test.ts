@@ -37,3 +37,11 @@ test('poller transitions + closed PR view + escalation + stale digest + rate bac
     assert.equal(readJson<any>(s.path('poller-state.json')).backoff.Test, time + 59 * 60000);
   } finally { f.restore(); }
 });
+
+test('poller reclaims a stale crash lock and keeps single-instance exclusion', () => {
+  const f = fixture(); try {
+    atomic(f.store.path('poller.lock'), { pid: 2147483647, at: new Date().toISOString() });
+    const release = acquirePollLock(f.store); assert.throws(() => acquirePollLock(f.store), /EEXIST/); release();
+    assert.deepEqual(pollOnce(f.store).errors, []);
+  } finally { f.restore(); }
+});
