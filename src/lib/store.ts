@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { homedir } from 'node:os';
 import { closeSync, existsSync, fsyncSync, futimesSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { broadcastSessions } from './identity.ts';
@@ -75,7 +76,7 @@ export function files(dir: string): string[] {
 }
 export class Store {
   home: string;
-  constructor(home = process.env.ORCH_HOME || '/Volumes/sourcecode/repos/cratis/.ai-work/orch') { this.home = home; }
+  constructor(home = process.env.ORCH_HOME || join(homedir(), '.pi', 'orch')) { this.home = home; }
   path(...parts: string[]) { return join(this.home, ...parts); }
   repos(): Record<string, Repo> { return readJson(this.path('repos.json'), {}); }
   repo(name: string): Repo { const r = this.repos()[key(name)]; if (!r) throw new Error(`repo not configured: ${name}`); return r; }

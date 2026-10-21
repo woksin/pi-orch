@@ -1,7 +1,6 @@
 {
   "name": "@woksin/pi-orch",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "description": "Lean repo-owner orchestration: durable order bus, batched candidate PRs, shared GitHub poller",
   "license": "MIT",
   "author": "woksin",
@@ -21,5 +20,28 @@
   "bin": {
     "orch": "./bin/orch",
     "orch-poll": "./bin/orch-poll"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woksin/pi-orch.git"
+  },
+  "homepage": "https://github.com/woksin/pi-orch#readme",
+  "engines": {
+    "node": ">=26"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "orchestration",
+    "multi-agent"
+  ],
+  "files": [
+    "src/",
+    "bin/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ]
 }

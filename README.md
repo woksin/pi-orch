@@ -1,5 +1,13 @@
 # @woksin/pi-orch — lean MVP + discovery
 
+> **Experimental.** Built for one developer's multi-session pi setup (about 20 coding-agent sessions on one machine working the
+> Cratis GitHub org). First supervised pilot starts 22 Oct 2026. Interfaces and file formats may change without notice.
+> Requires Node >= 26 (native TypeScript type stripping), `git` and an authenticated `gh` on PATH.
+
+What it does: in-process order delivery with ack/decline/done for pi sessions (no terminal typing), discovery and live
+enrolment of every pi session under configured roots, one repo-owner session per repository that ships batched
+"candidate" PRs (several issues per PR, one release), and one shared GitHub poller instead of per-session CI watches.
+
 Local, dependency-free Node 26 TypeScript package. Files + git + GitHub are truth; no
 ledger, terminal typing, automatic gates, auto-merge, or credential isolation.
 Nothing is installed or enrolled merely by checking out this package.
@@ -13,7 +21,7 @@ Set these **before launching** pi/pi-session; wrapper relaunches retain them:
 | `PI_ORCH_ID` | `L0`, `R-<Repo>` owner, or lane (e.g. `L3`). Bootstrap ID only when no matching bound assignment/tombstone exists. Enrolment is authoritative. |
 | `PI_ORCH_OPTOUT` | `1` disables discovery/delivery; explicit `PI_ORCH_ID` lane guards remain. |
 | `PI_REPO` | Repo key for owners/lanes, e.g. `Studio`. |
-| `ORCH_HOME` | Defaults to `/Volumes/sourcecode/repos/cratis/.ai-work/orch`. Tests always use a temporary home. |
+| `ORCH_HOME` | Defaults to `~/.pi/orch`. Tests always use a temporary home. |
 | `ORCH_NODE` | Optional executable override for bin scripts; default is the pilot's Node 26.8.1 absolute path. |
 | `PI_SESSION_WRAPPER_PID` | pi-session wrapper PID: stable session key `w<PID>`; otherwise `p<host-pid>`. |
 

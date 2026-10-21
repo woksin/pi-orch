@@ -3,10 +3,10 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.woksin.orch-poll</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/sindrewilting/.pi/agent/local-packages/pi-orch/bin/orch-poll</string>
+    <string>__PI_ORCH_DIR__/bin/orch-poll</string>
   </array>
   <key>EnvironmentVariables</key><dict>
-    <key>ORCH_HOME</key><string>/REPLACE/with/pilot/orch-home</string>
+    <key>ORCH_HOME</key><string>__HOME__/.pi/orch</string>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
