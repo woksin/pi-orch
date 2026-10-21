@@ -26,6 +26,12 @@
     "url": "git+https://github.com/woksin/pi-orch.git"
   },
   "homepage": "https://github.com/woksin/pi-orch#readme",
+  "bugs": {
+    "url": "https://github.com/woksin/pi-orch/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=26"
   },

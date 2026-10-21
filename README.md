@@ -79,8 +79,8 @@ of gh run watch / gh pr checks --watch. CLI push/land/rebuild enforce the same r
 
 ```json
 {
-  "roots": ["/Volumes/sourcecode/repos/cratis"],
-  "excludes": ["/Volumes/sourcecode/repos/Mesta"],
+  "roots": ["/path/to/your/repos"],
+  "excludes": ["/path/to/your/repos/not-this-one"],
   "phaseWindow": {
     "until": "2026-10-22T12:00:00Z",
     "requirePriority": "low",
