@@ -1,2 +1,4 @@
 #!/bin/sh
-exec "${ORCH_NODE:-node}" "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/src/cli/poll.ts" "$@"
+# Resolve symlinks (e.g. ~/.local/bin/orch-poll -> <pkg>/bin/orch-poll) before locating the package.
+self=$(realpath -- "$0" 2>/dev/null || printf '%s' "$0")
+exec "${ORCH_NODE:-node}" "$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/src/cli/poll.ts" "$@"
