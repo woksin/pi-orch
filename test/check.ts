@@ -12,4 +12,4 @@ function check(dir: string) {
     }
   }
 }
-check('src'); check('test'); console.log('Native TypeScript syntax + whitespace: passed');
+check('src'); check('test'); check('scripts'); console.log('Native TypeScript syntax + whitespace: passed');

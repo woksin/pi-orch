@@ -1,13 +1,15 @@
 {
   "name": "@woksin/pi-orch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lean repo-owner orchestration: durable order bus, batched candidate PRs, shared GitHub poller",
   "license": "MIT",
   "author": "woksin",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=30000 'test/*.test.ts'",
-    "check": "node test/check.ts"
+    "check": "node test/check.ts",
+    "prepack": "node scripts/build.ts",
+    "postpack": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\""
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -44,6 +46,8 @@
   ],
   "files": [
     "src/",
+    "dist/",
+    "scripts/",
     "bin/",
     "docs/",
     "README.md",

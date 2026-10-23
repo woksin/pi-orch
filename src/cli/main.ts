@@ -27,6 +27,7 @@ function parse(args: string[], command: string) {
 }
 export function main(argv = process.argv.slice(2), store = new Store(), options: DiscoveryOptions & { env?: NodeJS.ProcessEnv } = {}): number {
   try {
+    if (argv.length === 1 && argv[0] === '--help') { console.log('usage: orch send|board|deliver|cand|reconcile|sessions|enrol|unenrol|owners'); return 0; }
     let [command, ...args] = argv;
     if (command === 'cand') { command = args.shift()!; if (!['plan', 'build', 'sync', 'gate', 'notes', 'push', 'land', 'rebuild'].includes(command)) throw new OrchError('usage: orch cand plan|build|sync|gate|notes|push|land|rebuild', 1); }
     else if (!['send', 'board', 'deliver', 'reconcile', 'sessions', 'enrol', 'unenrol', 'owners'].includes(command)) throw new OrchError('usage: orch send|board|deliver|cand|reconcile|sessions|enrol|unenrol|owners', 1);
