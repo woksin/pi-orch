@@ -1,16 +1,34 @@
-# @woksin/pi-orch — lean MVP + discovery
+# pi-orch
 
-> **Experimental.** Built for one developer's multi-session pi setup (about 20 coding-agent sessions on one machine working the
-> Cratis GitHub org). First supervised pilot starts 22 Oct 2026. Interfaces and file formats may change without notice.
-> Requires Node >= 26 (native TypeScript type stripping), `git` and an authenticated `gh` on PATH.
+Experimental orchestration for many pi sessions working on one machine: a durable order bus, batched candidate PRs and one shared GitHub poller.
 
-What it does: in-process order delivery with ack/decline/done for pi sessions (no terminal typing), discovery and live
-enrolment of every pi session under configured roots, one repo-owner session per repository that ships batched
-"candidate" PRs (several issues per PR, one release), and one shared GitHub poller instead of per-session CI watches.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![npm](https://img.shields.io/npm/v/@woksin/pi-orch.svg)](https://www.npmjs.com/package/@woksin/pi-orch) [![CI](https://img.shields.io/github/actions/workflow/status/woksin/pi-orch/ci.yml?label=CI)](https://github.com/woksin/pi-orch/actions/workflows/ci.yml)
 
-Local, dependency-free Node 26 TypeScript package. Files + git + GitHub are truth; no
-ledger, terminal typing, automatic gates, auto-merge, or credential isolation.
-Nothing is installed or enrolled merely by checking out this package.
+> **Experimental.** Built for one developer's multi-session pi setup (about 20 coding-agent sessions working the Cratis GitHub org). Interfaces and file formats may change without notice. It needs Node 26 or newer, `git` and an authenticated `gh`. Expect rough edges, and do not depend on it yet.
+
+## Why
+
+- Many sessions typing into each other's terminals is fragile; orders should arrive in-process with ack, decline and done.
+- Several issues in one repository are better shipped as one candidate PR and one release.
+- Twenty sessions each watching CI is wasteful; one shared poller can do it.
+
+## Features
+
+- Order delivery between sessions with ack/decline/done (no terminal typing).
+- Discovery and live enrolment of pi sessions under configured roots.
+- One repo-owner session per repository that ships batched candidate PRs.
+- A shared GitHub poller (`orch-poll`) instead of per-session CI watches.
+- `orch` CLI for sending and managing orders.
+- Local, dependency-free TypeScript; files, git and GitHub are the source of truth. No auto-merge, automatic gates or credential isolation.
+- Dormant unless a `config.json` lists roots that contain the session's working directory.
+
+## Install
+
+```sh
+pi install npm:@woksin/pi-orch
+```
+
+Installing enrols nothing: the extension stays dormant until `ORCH_HOME/config.json` lists roots. The `orch` and `orch-poll` launchers live in the package's `bin/` and are not put on PATH for you. The operator steps for the poller and a pilot setup are in [Poller and pilot installation](#poller-and-pilot-installation-operator-steps--not-performed-here).
 
 ## Identity and activation
 
@@ -243,3 +261,14 @@ verifies dormant/active loading without any live session or model request. Git
 integration cases run in this same suite. `test/check.ts` syntax-checks all TS and
 rejects trailing whitespace; there is no compiler/linter dependency or CI workflow.
 Use pi-phase for both checks under agent execution policy. Regression tests explicitly place worktree aliases in native OS temporary paths, so managed-output paths cannot mask macOS realpath failures. The native package has no configured CI workflow or compiler build gate; local git/fake-gh integrations do not replace live pilot verification.
+
+## Related projects
+
+- [pi-setup](https://github.com/woksin/pi-setup): my full pi agent setup (rules, agents, extensions, installer) that ties these together
+- [pi-jobs](https://github.com/woksin/pi-jobs): background shell jobs and watches that wake the agent when they finish
+- [pi-recover](https://github.com/woksin/pi-recover): `/recover` picks up unfinished subagents, workflows and jobs after a crash or usage limit
+- [pi-context-budget](https://github.com/woksin/pi-context-budget): structured context handoffs and bounded long sessions
+
+## License
+
+MIT, see [LICENSE](LICENSE).
