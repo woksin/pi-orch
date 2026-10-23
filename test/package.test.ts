@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -26,7 +26,10 @@ function help(bin: string, home: string) {
 test('packed CLIs run as JavaScript from a global node_modules install', () => {
   const temp = workspace();
   try {
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'stale-package-test.js'), 'throw new Error("stale build");\n');
     run('npm', ['pack', '--pack-destination', temp]);
+    assert.equal(existsSync(join(root, 'dist')), false, 'postpack must remove checkout dist');
     const tarballs = readdirSync(temp).filter(name => name.endsWith('.tgz'));
     assert.equal(tarballs.length, 1);
     const prefix = join(temp, 'prefix with spaces');
@@ -34,19 +37,23 @@ test('packed CLIs run as JavaScript from a global node_modules install', () => {
     run('npm', ['install', '--global', '--prefix', prefix, '--ignore-scripts', '--legacy-peer-deps', '--no-audit', '--no-fund', join(temp, tarballs[0])]);
     const installed = join(prefix, 'lib/node_modules/@woksin/pi-orch');
     for (const entry of ['cli/main.js', 'cli/poll.js', 'lib/store.js']) assert.ok(existsSync(join(installed, 'dist', entry)), entry);
+    assert.equal(existsSync(join(installed, 'dist', 'stale-package-test.js')), false, 'prepack must clear stale output');
     const extension = 'src/extension/lane-bus.ts';
     assert.equal(readFileSync(join(installed, extension), 'utf8'), readFileSync(join(root, extension), 'utf8'));
     help(join(prefix, 'bin'), join(temp, 'home'));
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
 
-test('symlinked development launchers fall back to source when dist is absent', () => {
+test('symlinked checkout launchers run source even when stale dist exists', () => {
   const temp = workspace();
   try {
-    const checkout = join(temp, 'checkout'), bin = join(temp, 'bin');
+    const checkout = join(temp, 'checkout-node_modules-suffix'), bin = join(temp, 'bin');
     mkdirSync(checkout); mkdirSync(bin);
     for (const name of ['src', 'bin', 'package.json']) cpSync(join(root, name), join(checkout, name), { recursive: true });
     for (const name of ['orch', 'orch-poll']) symlinkSync(join(checkout, 'bin', name), join(bin, name));
+    help(bin, join(temp, 'home'));
+    mkdirSync(join(checkout, 'dist', 'cli'), { recursive: true });
+    for (const entry of ['main.js', 'poll.js']) writeFileSync(join(checkout, 'dist', 'cli', entry), 'throw new Error("stale build");\n');
     help(bin, join(temp, 'home'));
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });

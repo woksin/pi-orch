@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,4 +18,5 @@ function compile(dir: string) {
   }
 }
 // pi loads the extension's TypeScript entry itself; only compile the CLI graph.
+rmSync(join(root, 'dist'), { recursive: true, force: true });
 compile('cli'); compile('lib');

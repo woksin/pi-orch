@@ -150,8 +150,9 @@ Holds remain repo/block-scoped events, not cleared by acknowledgments.
 
 ## CLI
 
-`bin/orch` and `bin/orch-poll` are direct native-TS launchers. `gh` and `git` must
-be on PATH. Repo-mutating CLI commands serialize with an exclusive repo lock.
+`bin/orch` and `bin/orch-poll` run built JavaScript when installed under
+`node_modules`; in a source checkout they run TypeScript directly, with no build
+needed. `gh` and `git` must be on PATH. Repo-mutating CLI commands serialize with an exclusive repo lock.
 Exit codes: **0** success, **1** usage, **2** named precondition failed,
 **3** partial build (bounced deliveries), **4** nothing to do.
 
@@ -248,7 +249,9 @@ regardless of PID) heartbeat digests continue; stale digests at most every 30min
 
 ## Verification
 
-No npm install/build required. Use the pinned Node or any Node 26 with TS stripping:
+Checkout launchers run TypeScript directly; no build is needed. Installed package
+launchers run JavaScript built at pack time. Use the pinned Node or any Node 26
+with TS stripping for source checks:
 
 ```sh
 node test/check.ts

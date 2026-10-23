@@ -2,6 +2,8 @@
 # Resolve symlinks (e.g. ~/.local/bin/orch-poll -> <pkg>/bin/orch-poll) before locating the package.
 self=$(realpath -- "$0" 2>/dev/null || printf '%s' "$0")
 root=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)
-entry="$root/dist/cli/poll.js"
-[ -f "$entry" ] || entry="$root/src/cli/poll.ts"
+entry="$root/src/cli/poll.ts"
+case "$root/" in
+  */node_modules/*) entry="$root/dist/cli/poll.js" ;;
+esac
 exec "${ORCH_NODE:-node}" "$entry" "$@"
