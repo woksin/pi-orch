@@ -1,4 +1,7 @@
 #!/bin/sh
 # Resolve symlinks (e.g. ~/.local/bin/orch -> <pkg>/bin/orch) before locating the package.
 self=$(realpath -- "$0" 2>/dev/null || printf '%s' "$0")
-exec "${ORCH_NODE:-node}" "$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/src/cli/main.ts" "$@"
+root=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)
+entry="$root/dist/cli/main.js"
+[ -f "$entry" ] || entry="$root/src/cli/main.ts"
+exec "${ORCH_NODE:-node}" "$entry" "$@"

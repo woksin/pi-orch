@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { acquirePollLock, pollOnce } from '../lib/poller.ts';
 import { Store } from '../lib/store.ts';
 export function main(argv = process.argv.slice(2)): number {
+  if (argv.length === 1 && argv[0] === '--help') { console.log('usage: orch-poll [--once]'); return 0; }
   if (argv.some(a => a !== '--once') || argv.length > 1) { console.error('usage: orch-poll [--once]'); return 1; }
   const store = new Store(); let release: () => void;
   try { release = acquirePollLock(store); } catch (e: any) { console.error(`orch-poll: single instance lock unavailable: ${e.message}`); return 2; }
