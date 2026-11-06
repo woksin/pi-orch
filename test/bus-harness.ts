@@ -45,14 +45,18 @@ export function busFixture(input: { root?: string; id?: string; wrapper?: string
 // Actual SDK bindings and model loop; all resources and provider responses are local.
 function assertDelivery(mode: string) { if (!['steer', 'followUp'].includes(mode)) throw new Error(`invalid delivery: ${mode}`); }
 
-export async function nativeBusFixture(input: { id?: string; interactive?: string; root?: string; holdFirst?: boolean; extensions?: ((pi: any) => any)[]; toolCall?: { name: string; arguments: Record<string, unknown> } } = {}) {
-  const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import('@earendil-works/pi-coding-agent');
+export async function nativeBusFixture(input: { id?: string; interactive?: string; root?: string; holdFirst?: boolean; withoutBus?: boolean; assigned?: boolean; excludes?: string[]; bashOperations?: any; extensions?: ((pi: any) => any)[]; toolCall?: { name: string; arguments: Record<string, unknown> } } = {}) {
+  const { createAgentSession, createBashTool, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import('@earendil-works/pi-coding-agent');
   const { createAssistantMessageEventStream } = await import('@earendil-works/pi-ai');
   const output = process.env.AI_WORK_OUTPUT || resolve('.ai-work'); mkdirSync(output, { recursive: true });
   const root = input.root || mkdtempSync(join(output, 'orch-native-')), agentDir = join(root, 'agent'), store = new Store(join(root, 'orch'));
   mkdirSync(agentDir, { recursive: true });
-  atomic(store.path('config.json'), { roots: [root], excludes: [] });
+  atomic(store.path('config.json'), { roots: [root], excludes: input.excludes || [] });
   atomic(store.path('repos.json'), { Test: { slug: 'fake/Test', mainCheckout: root, enrolled: true } });
+  if (input.assigned) {
+    const key = sessionKey({});
+    atomic(store.path('assignments', `${key}.json`), { key, id: 'L9', role: 'lane', repo: 'Test', binding: { pid: process.pid, start: '2020-01-01T00:00:00.000Z' } });
+  }
   const requests: string[] = [], notices: string[] = [], errors: string[] = [], intervals: (() => void)[] = [], cleared: unknown[] = [], deferred: (() => Promise<void>)[] = [], watches: { closed: boolean }[] = [];
   let entered!: () => void, release!: () => void;
   const boundary = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
@@ -72,13 +76,15 @@ export async function nativeBusFixture(input: { id?: string; interactive?: strin
   });
   const loader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [...(input.extensions || []), pi => {
+      if (input.bashOperations) pi.registerTool(createBashTool(root, { operations: input.bashOperations }) as any);
       if (input.holdFirst) pi.registerTool({ name: 'boundary_tool', label: 'Boundary', description: 'Deterministic held tool boundary', parameters: { type: 'object', properties: {} } as any,
         async execute(_id, _params, signal) {
           entered(); signal?.addEventListener('abort', release, { once: true });
           try { await gate; return { content: [{ type: 'text', text: 'boundary passed' }], details: {} }; }
           finally { signal?.removeEventListener('abort', release); }
         } });
-      return createLaneBus(pi, { env: { ORCH_HOME: store.home, PI_ORCH_ID: input.id || 'L1', PI_REPO: 'Test', PI_ORCH_INTERACTIVE: input.interactive, LANE_STATUS_DIR: join(root, 'status') }, defer: fn => deferred.push(fn), handoff: () => false,
+      if (input.withoutBus) return;
+      return createLaneBus(pi, { env: { ORCH_HOME: store.home, PI_ORCH_ID: input.assigned ? undefined : input.id || 'L1', PI_REPO: 'Test', PI_ORCH_INTERACTIVE: input.interactive, LANE_STATUS_DIR: join(root, 'status') }, defer: fn => deferred.push(fn), handoff: () => false,
       processStart: async () => '2020-01-01T00:00:00.000Z', alive: () => true,
       metadata: (_store, cwd, pid) => ({ cwd, hostStart: '2020-01-01T00:00:00.000Z', processIdentity: { pid, start: '2020-01-01T00:00:00.000Z' } }),
       interval: fn => { intervals.push(fn); return { unref() {} }; }, clear: handle => { cleared.push(handle); }, watch: () => { const w = { closed: false, unref() {}, close() { w.closed = true; } }; watches.push(w); return w; } }); }] });

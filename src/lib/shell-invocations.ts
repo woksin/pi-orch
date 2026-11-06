@@ -7,7 +7,7 @@ const fields: Record<string, string> = { bash: "command", job_start: "command", 
 export const MALFORMED_EXECUTION = "Execution guard: malformed execution input or nested-tool depth exceeded.";
 
 const invalid = (): ShellInvocations => ({ calls: [], error: MALFORMED_EXECUTION });
-const validCwd = (input: Record<string, unknown>) => input.cwd === undefined || typeof input.cwd === "string" && !!input.cwd.trim();
+const validCwd = (input: Record<string, unknown>) => input.cwd === undefined || typeof input.cwd === "string" && (input.cwd === "" || !!input.cwd.trim());
 const validChild = (child: unknown): child is { recipient_name: string; parameters: unknown } => record(child) && typeof child.recipient_name === "string" && !!child.recipient_name.trim();
 function nestedInvocations(input: Record<string, unknown>, cwd: string, depth: number): ShellInvocations {
 	if (!Array.isArray(input.tool_uses)) return invalid();
@@ -21,8 +21,8 @@ function nestedInvocations(input: Record<string, unknown>, cwd: string, depth: n
 	return { calls };
 }
 function executionInvocations(name: string, input: Record<string, unknown>, cwd: string, depth: number, field?: string): ShellInvocations {
-	const executionCwd = typeof input.cwd === "string" ? resolve(cwd, input.cwd) : cwd;
-	if (!field) return nestedInvocations(input, executionCwd, depth);
+	if (!field) return nestedInvocations(input, cwd, depth);
+	const executionCwd = name !== "bash" && typeof input.cwd === "string" ? resolve(cwd, input.cwd) : cwd;
 	if (typeof input[field] !== "string" || !input[field].trim()) return invalid();
 	return { calls: [{ name, input, cwd: executionCwd, command: input[field] }] };
 }
@@ -35,21 +35,21 @@ export function shellInvocations(name: string, input: unknown, cwd: string, dept
 	const field = Object.hasOwn(fields, name) ? fields[name] : undefined;
 	if (depth > 4) return invalid();
 	if (!wrapper && !field) return { calls: [{ name, input, cwd }] };
-	if (!record(input) || !validCwd(input)) return invalid();
+	if (!record(input) || field && name !== "bash" && !validCwd(input)) return invalid();
 	return executionInvocations(name, input, cwd, depth, field);
 }
 
-/** Adapt execution leaves to the existing bash policy without changing its parser or identity. */
-export function shellGuard(handler: (event: any, ctx: any) => any, enabled: (event: any, ctx: any) => boolean = () => true) {
+/** Session authority stays intact; only the internal third argument names the execution target. */
+export function shellGuard(handler: (event: any, ctx: any, executionCwd: string) => any, enabled: (event: any, ctx: any) => boolean = () => true) {
 	return (event: any, ctx: any) => {
-		if (!enabled(event, ctx)) return handler(event, ctx);
+		if (!enabled(event, ctx)) return handler(event, ctx, ctx?.cwd ?? process.cwd());
 		const normalized = shellInvocations(event.toolName, event.input, ctx?.cwd ?? process.cwd());
 		if (normalized.error) return { block: true, reason: normalized.error };
 		const run = (index: number): any => {
 			const call = normalized.calls[index];
 			if (!call) return;
 			const next = { ...event, toolName: call.command === undefined ? call.name : "bash", input: call.command === undefined ? call.input : { ...(call.input as object), command: call.command } };
-			const result = handler(next, ctx ? { ...ctx, cwd: call.cwd } : ctx);
+			const result = handler(next, ctx, call.cwd);
 			const proceed = (verdict: any) => verdict?.block ? verdict : run(index + 1);
 			return isPromise(result) ? result.then(proceed) : proceed(result);
 		};
