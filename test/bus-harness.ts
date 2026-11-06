@@ -45,7 +45,7 @@ export function busFixture(input: { root?: string; id?: string; wrapper?: string
 // Actual SDK bindings and model loop; all resources and provider responses are local.
 function assertDelivery(mode: string) { if (!['steer', 'followUp'].includes(mode)) throw new Error(`invalid delivery: ${mode}`); }
 
-export async function nativeBusFixture(input: { id?: string; interactive?: string; root?: string; holdFirst?: boolean } = {}) {
+export async function nativeBusFixture(input: { id?: string; interactive?: string; root?: string; holdFirst?: boolean; extensions?: ((pi: any) => any)[]; toolCall?: { name: string; arguments: Record<string, unknown> } } = {}) {
   const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import('@earendil-works/pi-coding-agent');
   const { createAssistantMessageEventStream } = await import('@earendil-works/pi-ai');
   const output = process.env.AI_WORK_OUTPUT || resolve('.ai-work'); mkdirSync(output, { recursive: true });
@@ -64,14 +64,14 @@ export async function nativeBusFixture(input: { id?: string; interactive?: strin
     streamSimple(model, context) {
       requests.push(JSON.stringify(context.messages));
       const stream = createAssistantMessageEventStream();
-      const tool = input.holdFirst && requests.length === 1;
-      const message: any = { role: 'assistant', content: tool ? [{ type: 'toolCall', id: 'boundary-1', name: 'boundary_tool', arguments: {} }] : [{ type: 'text', text: 'fixture response' }], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: tool ? 'toolUse' : 'stop', timestamp: Date.now() };
+      const tool = (input.holdFirst || input.toolCall) && requests.length === 1;
+      const message: any = { role: 'assistant', content: tool ? [{ type: 'toolCall', id: 'boundary-1', name: input.toolCall?.name || 'boundary_tool', arguments: input.toolCall?.arguments || {} }] : [{ type: 'text', text: 'fixture response' }], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: tool ? 'toolUse' : 'stop', timestamp: Date.now() };
       queueMicrotask(() => { stream.push({ type: 'done', reason: message.stopReason, message }); stream.end(); });
       return stream;
     }
   });
   const loader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [pi => {
+    extensionFactories: [...(input.extensions || []), pi => {
       if (input.holdFirst) pi.registerTool({ name: 'boundary_tool', label: 'Boundary', description: 'Deterministic held tool boundary', parameters: { type: 'object', properties: {} } as any,
         async execute(_id, _params, signal) {
           entered(); signal?.addEventListener('abort', release, { once: true });

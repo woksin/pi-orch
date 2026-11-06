@@ -38,7 +38,12 @@ function liveOwner(store: Store, repo: string, options: DiscoveryOptions) {
 }
 interface HealthEdge { fingerprint: string; episode: string }
 const safeId = (id: unknown): id is string => typeof id === 'string' && /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(id);
-function parking(id: unknown, time: number, env: NodeJS.ProcessEnv): 'parked' | 'ordinary' | 'uncertain' {
+function validStatusTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value.replace(/Z$/, value.includes('.') ? 'Z' : '.000Z');
+}
+export function parking(id: unknown, time: number, env: NodeJS.ProcessEnv): 'parked' | 'ordinary' | 'uncertain' {
   if (!safeId(id)) return 'uncertain';
   const root = env.LANE_STATUS_DIR || (env.INBOX_DIR ? join(env.INBOX_DIR, 'status') : join(homedir(), '.pi', 'agent', 'lane-status'));
   let fd: number | undefined;
@@ -46,11 +51,19 @@ function parking(id: unknown, time: number, env: NodeJS.ProcessEnv): 'parked' | 
     fd = openSync(join(root, `${id}.status`), constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > 4096) return 'uncertain';
-    const buffer = Buffer.alloc(4096), size = readSync(fd, buffer, 0, buffer.length, 0), line = buffer.toString('utf8', 0, size).split('\n')[0];
+    const buffer = Buffer.alloc(4097);
+    let size = 0, count: number;
+    do { count = readSync(fd, buffer, size, buffer.length - size, size); size += count; } while (count && size < buffer.length);
+    if (size > 4096) return 'uncertain';
+    const line = buffer.toString('utf8', 0, size).replace(/\n$/, '');
+    if (/[\r\n]/.test(line)) return 'uncertain';
     if (line === 'parked') return 'parked';
-    const match = /^(?:waiting-on|barred-by) ".*" until (\S+)$/.exec(line);
-    if (match) return Date.parse(match[1]) > time ? 'parked' : 'uncertain';
-    return ['working', 'running', 'idle'].includes(line) || /^closed(?: at .+)?$/.test(line) ? 'ordinary' : 'uncertain';
+    const match = /^(waiting-on|barred-by|parked) "[^"]*" until (\S+)$/.exec(line);
+    if (match) return validStatusTime(match[2]) && (match[1] === 'parked' || Date.parse(match[2]) > time) ? 'parked' : 'uncertain';
+    const ordinary = /^(?:working|closed) since (\S+)$/.exec(line)
+      ?? /^closed(?: reassigned-to [A-Za-z][A-Za-z0-9_-]*)? at (\S+)(?: reason "[^"\r\n]*")?$/.exec(line);
+    if (ordinary) return validStatusTime(ordinary[1]) ? 'ordinary' : 'uncertain';
+    return ['working', 'running', 'idle', 'closed'].includes(line) ? 'ordinary' : 'uncertain';
   } catch (error: any) { return error.code === 'ENOENT' ? 'ordinary' : 'uncertain'; }
   finally { if (fd !== undefined) closeSync(fd); }
 }

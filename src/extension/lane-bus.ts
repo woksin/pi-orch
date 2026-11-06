@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { existsSync, mkdirSync, unlinkSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { shellGuard } from '../lib/shell-invocations.ts';
 import { canonical } from '../lib/paths.ts';
 import { atomic, now, readJson, Store } from '../lib/store.ts';
 import type { Message } from '../lib/store.ts';
@@ -216,7 +217,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     content.push(...roleNote());
     if (content.length) return { message: { customType: claimed.length ? 'orch-maintenance' : 'orch-role', content: content.join('\n\n'), display: false } };
   });
-  pi.on('tool_call', (event, ctx) => {
+  pi.on('tool_call', shellGuard((event, ctx) => {
     const scoped = active(store, ctx.cwd, env);
     if (!scoped && !env.PI_ORCH_ID) return;
     notifyConfig(ctx);
@@ -234,7 +235,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
       const reason = guard(command, kind, ctx.hasUI !== false, guarded.repo, holds(own, guarded.repo));
       if (reason) return { block: true, reason };
     }
-  });
+  }, (_event, ctx) => !!active(store, ctx.cwd, env) || !!env.PI_ORCH_ID));
   function register(name: string, properties: Record<string, unknown>, required: string[], execute: (p: any, ctx: ExtensionContext) => unknown) {
     pi.registerTool({ name, defaultActive: false, label: name, description: name.replaceAll('_', ' '), parameters: { type: 'object', properties, required, additionalProperties: false } as any,
       async execute(_callId, p, _signal, _update, ctx) { if (!isPrimary(ctx)) throw new Error('orders belong to the primary session'); refreshIdentity(); return result(execute(p, ctx)); } });
