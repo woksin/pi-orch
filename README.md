@@ -42,6 +42,8 @@ Set these **before launching** pi/pi-session; wrapper relaunches retain them:
 | `ORCH_HOME` | Defaults to `~/.pi/orch`. Tests always use a temporary home. |
 | `ORCH_NODE` | Optional executable override for bin scripts; default is the pilot's Node 26.8.1 absolute path. |
 | `PI_SESSION_WRAPPER_PID` | pi-session wrapper PID: stable session key `w<PID>`; otherwise `p<host-pid>`. |
+| `PI_ORCH_INTERACTIVE` | `1` makes assigned non-L0 maintenance notices UI-only until the next legitimate turn. |
+| `LANE_STATUS_DIR` | Optional directory for `<safe-id>.status` parking hints; defaults to `${INBOX_DIR:-~/inbox}/status`. |
 
 Activation requires cwd under a `config.json` root, not under an exclude, and no
 opt-out. No config/roots means no discovery/delivery. Explicit lane guards still apply outside roots, under excludes/optout and without config. Malformed config is dormant and reported once, not thrown from load/tool handlers.
@@ -77,8 +79,29 @@ Receipts are claimed **before** send: each delivery/reminder is at-most-once, so
 send throw or crash cannot cause turn spam. A crash between claim and send can
 lose that wake; pi offers no transaction with the filesystem. Outstanding acks
 remain visible and can remind/escalate. One deadline reminder; escalation after
-+15min. L0 questions/escalations/idle and ack-required reports are immediate; other
-messages form at most one digest per ten minutes (throttle survives restarts).
++15min. Actionable messages (including orders, questions, escalations, reports,
+holds, releases and idle) and anything requiring acknowledgment remain immediate.
+Only `info`, `ci`, `ack` and `digest` without acknowledgment are maintenance.
+L0 receives maintenance as a compact UI digest at most once per ten minutes
+(throttle survives restarts), never as an automatic follow-up or hidden drain.
+
+Assigned non-L0 sessions with `PI_ORCH_INTERACTIVE=1` or a current parking hint
+receive maintenance as a compact UI notice with an `orch_status` pointer, without
+starting or queuing a turn. A parking hint is the first line of the safe effective
+ID's `.status` file: exactly `parked`, or `waiting-on "..." until <timestamp>` /
+`barred-by "..." until <timestamp>` with a valid future timestamp. Missing,
+unreadable, expired, closed or malformed hints do not park a session. Parking is
+only a presentation hint: it changes no assignment, health, guard or ack deadline.
+Ordinary unparked non-L0 sessions retain immediate maintenance delivery.
+
+The durable `ui-notified` receipt is claimed before notification. Pending notices
+are batched into one non-displayed `before_agent_start` context message on the
+next legitimate primary turn, together with the role note when due; `delivered`
+is then claimed before returning the batch. Workers and active handoffs do not
+drain it. Re-entry, resume and repeated scans do not repeat the notification or
+batch. These are at-most-once attempts, not transactional/exactly-once delivery:
+a crash after claiming can lose a notice or context injection. Inbox details
+remain available through `orch_status`; delivery never acknowledges an order.
 Shutdown closes watchers/timers and removes only the session's own heartbeat.
 
 Tools: `order_ack {id,plan}`, `order_decline {id,reason}`,
@@ -131,7 +154,7 @@ realpaths, including symlinks and macOS /var vs /private/var aliases.
 - `sessions/<key>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt, hostStart and processIdentity.
 - `heartbeats/<key>.json`: overwritten liveness/state, last turn end, unacked IDs.
 - `inbox/<id>/<msgId>.json`: immutable message; ID `yyyymmddThhmmss-from-xxxx`.
-- `receipts/<id>/<msgId>.<state>.json`: immutable delivered/acked/declined/done/reminded/escalated transitions.
+- `receipts/<id>/<msgId>.<state>.json`: immutable ui-notified/delivered/acked/declined/done/reminded/escalated transitions.
 - `deliveries/<Repo>/<dId>.json`: immutable delivery with issue/branch/SHA/deps/notes/intent/gate log.
 - `deliveries/<Repo>/<dId>.status.<n>.json`: append-only status; highest number wins.
 - `cands/<Repo>/<name>.json`: candidate; members freeze at build, head advances only via sync.
@@ -242,7 +265,13 @@ heartbeat <=90s old and a verified live process start identity. An assignment re
 
 Each 120s tick performs one open-PR list per enrolled repo, plus one view for a
 candidate PR newly missing from the open list. Cache CI transitions SUCCESS,
-FAILURE, MERGED wake the owner. No-check rollups remain UNKNOWN (not landable).
+FAILURE, MERGED notify the owner. FAILURE also goes to L0 when no validated owner
+assignment has a verified live `{pid,start}` binding. Config/legacy owner mappings,
+missing bindings, unverifiable/reused PIDs and heartbeat freshness alone do not
+prove an owner is present. A live owner's stale heartbeat does not trigger this
+fallback. SUCCESS/MERGED remain owner-only; unchanged cached transitions are not
+repeated after restart. Quiet UI presentation never loses the durable owner inbox
+entry. No-check rollups remain UNKNOWN (not landable).
 Rate 403/429 backs off that repo ten minutes. Escalations and stale (>10min,
 regardless of PID) heartbeat digests continue; stale digests at most every 30min.
 `orch-poll --once` runs one tick; exit 1 usage, 2 lock/poll errors, 0 success.
@@ -260,10 +289,18 @@ node --test --test-timeout=30000 'test/*.test.ts'
 
 All tests use temporary ORCH_HOME and local bare git origins; fake gh precedes
 PATH. Unit tests exercise pure decisions without pi, and a fake-pi factory test
-verifies dormant/active loading without any live session or model request. Git
-integration cases run in this same suite. `test/check.ts` syntax-checks all TS and
-rejects trailing whitespace; there is no compiler/linter dependency or CI workflow.
-Use pi-phase for both checks under agent execution policy. Regression tests explicitly place worktree aliases in native OS temporary paths, so managed-output paths cannot mask macOS realpath failures. The native package has no configured CI workflow or compiler build gate; local git/fake-gh integrations do not replace live pilot verification.
+verifies dormant/active loading without a live installation. A native SDK fixture
+uses the real resource loader, extension bindings, lifecycle and model loop with
+an isolated local provider: maintenance starts no model call, joins the next
+legitimate turn as one hidden batch, and urgent follow-ups still start a run.
+CI pins Node 26 and SDK 1.3.0. Git/fake-gh integration cases run in the same suite.
+`test/check.ts` syntax-checks all TS and rejects trailing whitespace; there is no
+separate compiler build. The local gates add `npm run check` to CI's `npm test`
+and `npm pack --dry-run`.
+Use pi-phase for checks under agent execution policy. Regression tests explicitly
+place worktree aliases in native OS temporary paths, so managed-output paths
+cannot mask macOS realpath failures. Local integrations do not replace live pilot
+verification.
 
 ## Related projects
 

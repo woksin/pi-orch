@@ -3,7 +3,10 @@ import { ownerId, pruneAssignments } from './discovery.ts';
 import type { DiscoveryOptions } from './discovery.ts';
 import { gh } from './candidates.ts';
 import { overdue } from './decisions.ts';
-import { atomic, key, lock, now, readJson, Store } from './store.ts';
+import { atomic, key, lock, now, pidAlive, readJson, Store } from './store.ts';
+import { validateRole } from './identity.ts';
+import type { Assignment } from './identity.ts';
+import { processStart } from './metadata.ts';
 
 export function rollup(checks: any[]): string {
   if (!checks?.length) return 'UNKNOWN';
@@ -19,7 +22,24 @@ function recipientIds(store: Store): string[] {
 function notify(store: Store, to: string, kind: string, subject: string, body: string) {
   store.send({ from: 'L0', to, kind, subject, body, requiresAck: false, ackDeadlineMin: 30 });
 }
+function ownerAssignment(a: Assignment, repo: string, id: string) {
+  if (a.id !== id) return false;
+  if (a.role !== 'owner' || a.repo !== repo) return false;
+  try { validateRole(a.id, a.role, a.repo); return true; } catch { return false; }
+}
+function liveOwner(store: Store, repo: string, options: DiscoveryOptions) {
+  const id = ownerId(store, repo);
+  return store.list<Assignment>('assignments').some(a => {
+    if (!ownerAssignment(a, repo, id) || !a.binding?.start) return false;
+    return (options.alive || pidAlive)(a.binding.pid) && (options.start || processStart)(a.binding.pid) === a.binding.start;
+  });
+}
 export function pollOnce(store: Store, time = Date.now(), options: DiscoveryOptions = {}) {
+  const starts = new Map<number, string | undefined>(), optionsStart = options.start;
+  options = { ...options, start: (pid => {
+    if (!starts.has(pid)) starts.set(pid, (optionsStart || processStart)(pid));
+    return starts.get(pid);
+  }) };
   pruneAssignments(store, options);
   const stateFile = store.path('poller-state.json');
   const state = readJson<any>(stateFile, { backoff: {}, staleDigestAt: 0 });
@@ -40,7 +60,10 @@ export function pollOnce(store: Store, time = Date.now(), options: DiscoveryOpti
       }
       for (const c of store.candidates(repo)) {
         const p = prs.find((p: any) => p.number === c.pr), old = previous.prs.find((p: any) => p.number === c.pr);
-        if (p && p.ci !== old?.ci && ['SUCCESS', 'FAILURE', 'MERGED'].includes(p.ci)) notify(store, ownerId(store, repo), 'ci', `${c.name}: ${p.ci}`, `PR #${p.number} at ${p.headRefOid}: ${p.ci}`);
+        if (!p || p.ci === old?.ci || !['SUCCESS', 'FAILURE', 'MERGED'].includes(p.ci)) continue;
+        const subject = `${c.name}: ${p.ci}`, body = `PR #${p.number} at ${p.headRefOid}: ${p.ci}`;
+        notify(store, ownerId(store, repo), 'ci', subject, body);
+        if (p.ci === 'FAILURE' && !liveOwner(store, repo, options)) notify(store, 'L0', 'ci', subject, body);
       }
       atomic(file, { at: new Date(time).toISOString(), prs }); delete state.backoff[repo];
     } catch (e: any) { errors.push(`${repo}: ${e.message}`); if (/\b(?:403|429)\b/.test(e.message)) state.backoff[repo] = time + 600000; }

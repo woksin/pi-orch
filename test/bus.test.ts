@@ -1,20 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import laneBus, { handoffActive } from '../src/extension/lane-bus.ts';
 import { atomic, Store } from '../src/lib/store.ts';
 import { deliveryBatch, formatMessage, guard, holds, phaseGuard } from '../src/lib/decisions.ts';
 import { enrol, unenrol } from '../src/lib/discovery.ts';
-import { busFixture } from './bus-harness.ts';
+import { busFixture, nativeBusFixture } from './bus-harness.ts';
 
 test('lane-bus delivery formatting, receipts, reminder and L0 digest decisions', async () => {
   const s = new Store(mkdtempSync(join(tmpdir(), 'orch-bus-unit-')));
   const [m] = s.send({ from: 'L0', to: 'L1', kind: 'order', subject: 'Fix', body: 'Body', requiresAck: true, ackDeadlineMin: 1 });
   assert.equal(formatMessage(m), `[orch order from L0] Fix\nBody\n→ ack with order_ack/order_decline (id ${m.id})`);
   const batch = (id = 'L1', last = 0, time = Date.now() + 120000) => deliveryBatch([m], id, (msg, state) => s.has('L1', msg, state), last, time);
-  assert.equal(batch().immediate.length, 1); assert.equal(batch('L0').digest.length, 1); assert.equal(batch('L0', Date.now()).digest.length, 0);
+  assert.equal(batch().immediate.length, 1); assert.equal(batch('L0').immediate.length, 1);
+  const maintenance = { ...m, kind: 'info', requiresAck: false };
+  assert.equal(deliveryBatch([maintenance], 'L0', () => false, 0).digest.length, 1);
+  assert.equal(deliveryBatch([maintenance], 'L0', () => false, Date.now()).digest.length, 0);
   s.record('L1', m.id, 'delivered'); assert.equal(batch().immediate.length, 0); assert.equal(batch().reminders.length, 1);
   s.record('L1', m.id, 'reminded'); assert.equal(batch().reminders.length, 0); s.record('L1', m.id, 'acked'); assert.equal(s.unacked('L1').length, 0);
   for (const kind of ['question', 'escalation', 'idle', 'report']) assert.equal(deliveryBatch([{ ...m, id: kind, kind }], 'L0', () => false, Date.now()).immediate.length, 1);
@@ -92,10 +95,10 @@ test('real extension reminder once, ack/decline suppression, agent_end rescan an
 test('L0 digest throttle persists across scans and session switches', async () => {
   const h = busFixture({ id: 'L0' });
   try {
-    h.send('L0', 'info', 'first', false); await h.start(); assert.equal(h.sent.length, 1); assert.match(h.sent[0], /digest/);
-    h.send('L0', 'info', 'batched', false); h.tick(); await h.start('new'); assert.equal(h.sent.length, 1);
-    h.send('L0', 'question', 'immediate', false); h.tick(); assert.equal(h.sent.length, 2); assert.match(h.sent[1], /immediate/);
-    h.advance(600001); h.emit('agent_end'); assert.equal(h.sent.length, 3); assert.match(h.sent[2], /batched/); h.tick(); assert.equal(h.sent.length, 3);
+    h.send('L0', 'info', 'first', false); await h.start(); assert.equal(h.sent.length, 0); assert.match(h.notices[0], /digest.*first/);
+    h.send('L0', 'info', 'batched', false); h.tick(); await h.start('new'); assert.equal(h.notices.length, 1);
+    h.send('L0', 'question', 'immediate', false); h.tick(); assert.equal(h.sent.length, 1); assert.match(h.sent[0], /immediate/);
+    h.advance(600001); h.emit('agent_end'); assert.equal(h.notices.length, 2); assert.match(h.notices[1], /batched/); h.tick(); assert.equal(h.sent.length, 1);
   } finally { h.stop(); }
 });
 
@@ -259,4 +262,122 @@ test('N3: inactive starts/stops and unchanged presentation never reset the activ
     h.stop(); assert.equal(h.toolUpdates.length, 2); assert.deepEqual(h.activeTools, ['bash']);
     h.stop(); await h.start('outside', true, h.root + '-outside'); h.stop(); assert.equal(h.toolUpdates.length, 2);
   } finally { h.stop(); }
+});
+
+function putMessage(h: ReturnType<typeof busFixture>, kind: string, requiresAck = false, box = 'L1') {
+  const m = h.send(box, 'info', `${kind} subject`, false);
+  const message = { ...m, kind, requiresAck };
+  atomic(h.store.path('inbox', box, `${m.id}.json`), message);
+  return message;
+}
+
+test('interactive maintenance is UI-only once, then batched into the next primary turn without accepting orders', async () => {
+  const h = busFixture({ id: 'L1', interactive: '1' });
+  try {
+    await h.start();
+    const quiet = ['info', 'ci', 'ack', 'digest'].map(kind => putMessage(h, kind));
+    h.tick(); h.watch(); h.emit('agent_end');
+    assert.equal(h.sent.length, 0); assert.equal(h.notices.length, 1); assert.match(h.notices[0], /orch_status/);
+    for (const m of quiet) { assert.ok(h.store.has('L1', m.id, 'ui-notified')); assert.equal(h.store.has('L1', m.id, 'delivered'), false); }
+    assert.equal(h.emit('before_agent_start', {}, h.context('worker', false)), undefined);
+    h.setHandoff(true); assert.equal(h.emit('before_agent_start'), undefined); h.setHandoff(false);
+    await h.start('resumed'); assert.equal(h.notices.length, 1);
+    const note = h.emit('before_agent_start'); assert.equal(note.message.customType, 'orch-maintenance');
+    for (const m of quiet) { assert.ok(note.message.content.includes(m.subject)); assert.ok(h.store.has('L1', m.id, 'delivered')); assert.equal(h.store.has('L1', m.id, 'acked'), false); }
+    assert.match(note.message.content, /Orch role lane/); assert.equal(h.emit('before_agent_start'), undefined);
+    const urgent = ['order', 'question', 'escalation', 'report', 'hold', 'release', 'idle'].map(kind => putMessage(h, kind));
+    urgent.push(putMessage(h, 'ci', true)); h.tick(); assert.equal(h.sent.length, urgent.length);
+    assert.match(h.tool('git push').reason, /deliver to R-Test/);
+  } finally { h.stop(); }
+});
+
+test('parked hints are safe, local and time-bounded; ordinary sessions retain immediate delivery', async () => {
+  for (const hint of ['parked', 'waiting-on "CI" until FUTURE', 'barred-by "owner" until FUTURE', 'waiting-on "CI" until PAST', 'waiting-on "CI" until invalid', 'closed at now', 'working', '']) {
+    const h = busFixture({ id: 'L1' });
+    try {
+      mkdirSync(h.env.LANE_STATUS_DIR, { recursive: true });
+      writeFileSync(join(h.env.LANE_STATUS_DIR, 'L1.status'), hint.replace('FUTURE', new Date(h.time + 60000).toISOString()).replace('PAST', new Date(h.time - 1).toISOString()) + '\nparked');
+      await h.start(); const m = putMessage(h, 'ci'); h.tick();
+      const quiet = hint === 'parked' || hint.includes('FUTURE'); assert.equal(h.sent.length, quiet ? 0 : 1, hint); assert.equal(h.notices.length, quiet ? 1 : 0, hint);
+      assert.equal(h.store.has('L1', m.id, 'delivered'), !quiet); assert.equal(h.timers.length, 2);
+      if (quiet) { assert.ok(h.emit('before_agent_start').message.content.includes(m.subject)); assert.equal(h.emit('before_agent_start'), undefined); }
+    } finally { h.stop(); }
+  }
+  const h = busFixture({ id: 'L1' });
+  try { await h.start(); putMessage(h, 'info'); h.tick(); assert.equal(h.sent.length, 1); } finally { h.stop(); }
+});
+
+test('UI claim precedes throwing notification, survives re-entry and never suppresses an urgent follow-up', async () => {
+  let attempts = 0;
+  const h = busFixture({ id: 'L1', interactive: '1', notify() { if (++attempts === 1) throw new Error('notification failed'); } });
+  try {
+    await h.start(); const m = putMessage(h, 'info'); h.tick(); h.tick(); await h.start('again');
+    assert.equal(h.notices.length, 1); assert.ok(h.store.has('L1', m.id, 'ui-notified')); assert.equal(h.sent.length, 0);
+    h.setHandoff(true); const order = h.send(); h.tick(); assert.equal(h.sent.length, 0); h.setHandoff(false); h.tick();
+    assert.equal(h.sent.length, 1); assert.equal(h.store.has('L1', order.id, 'acked'), false);
+    assert.ok(h.emit('before_agent_start').message.content.includes(m.subject));
+  } finally { h.stop(); }
+});
+
+test('L0 digests only maintenance, never actionable or ack-required messages, with no hidden drain', async () => {
+  const h = busFixture({ id: 'L0', interactive: '1' });
+  try {
+    await h.start(); const quiet = ['info', 'ci', 'ack', 'digest'].map(kind => putMessage(h, kind, false, 'L0'));
+    const urgent = ['order', 'question', 'escalation', 'report', 'hold', 'release', 'idle'].map(kind => putMessage(h, kind, false, 'L0'));
+    urgent.push(putMessage(h, 'info', true, 'L0')); h.tick(); h.tick();
+    assert.equal(h.sent.length, urgent.length); assert.equal(h.notices.length, 1);
+    quiet.forEach(m => assert.ok(h.store.has('L0', m.id, 'delivered')));
+    const note = h.emit('before_agent_start'); assert.equal(note.message.customType, 'orch-role'); assert.doesNotMatch(note.message.content, /subject/);
+  } finally { h.stop(); }
+});
+
+test('native SDK 1.3.0 bindings: UI maintenance starts no run, hidden context joins a legitimate run once, urgent still wakes', async () => {
+  const h = await nativeBusFixture({ interactive: '1' });
+  try {
+    const a = h.send('info', 'native quiet A'), b = h.send('ci', 'native quiet B');
+    await h.tick(); await h.tick(); assert.equal(h.requests.length, 0); assert.equal(h.notices.length, 1);
+    assert.ok(h.store.has('L1', a.id, 'ui-notified')); assert.equal(h.store.has('L1', a.id, 'delivered'), false);
+    await h.session.prompt('legitimate user turn');
+    assert.equal(h.requests.length, 1); assert.match(h.requests[0], /native quiet A/); assert.match(h.requests[0], /native quiet B/);
+    assert.ok(h.store.has('L1', a.id, 'delivered')); assert.ok(h.store.has('L1', b.id, 'delivered'));
+    const entries = h.session.sessionManager.getEntries().filter((e: any) => e.type === 'custom_message' && e.customType === 'orch-maintenance');
+    assert.equal(entries.length, 1); assert.equal((entries[0] as any).display, false);
+    await h.session.prompt('another legitimate turn');
+    assert.equal(h.requests.length, 2); assert.equal(h.session.sessionManager.getEntries().filter((e: any) => e.type === 'custom_message' && e.customType === 'orch-maintenance').length, 1);
+    const urgent = h.send('order', 'native urgent order', true); await h.tick();
+    assert.equal(h.requests.length, 3); assert.match(h.requests[2], /native urgent order/); assert.equal(h.store.has('L1', urgent.id, 'acked'), false);
+    assert.deepEqual(h.errors, []);
+  } finally { await h.shutdown(); }
+  assert.equal(h.cleared.length, h.intervals.length);
+});
+
+test('native SDK L0 maintenance is a non-waking UI digest, not future hidden context', async () => {
+  const h = await nativeBusFixture({ id: 'L0' });
+  try {
+    h.send('info', 'L0 quiet sentinel'); await h.tick(); await h.tick();
+    assert.equal(h.notices.length, 1); assert.match(h.notices[0], /digest/); assert.equal(h.requests.length, 0);
+    await h.session.prompt('legitimate coordinator turn'); assert.equal(h.requests.length, 1); assert.doesNotMatch(h.requests[0], /L0 quiet sentinel/);
+    h.send('question', 'L0 urgent sentinel'); await h.tick(); assert.equal(h.requests.length, 2); assert.match(h.requests[1], /L0 urgent sentinel/);
+    assert.deepEqual(h.errors, []);
+  } finally { await h.shutdown(); }
+});
+
+test('quiet stable-key maintenance obeys process identity and parking fallback paths stay presentation-only', async () => {
+  const root = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-quiet-stable-'));
+  const inbox = join(root, 'inbox'), dir = join(inbox, 'status'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'L1.status'), 'parked');
+  const a = busFixture({ root, id: 'L1', wrapper: '901001', inboxDir: inbox });
+  let m: any;
+  try {
+    await a.start(); m = putMessage(a, 'ci', false, a.key);
+    atomic(a.store.path('inbox', a.key, `${m.id}.json`), { ...m, refs: { processIdentity: { pid: 901001, start: '2020-01-01T00:00:00.000Z' } } });
+    a.tick(); assert.equal(a.sent.length, 0); assert.equal(a.notices.length, 1); assert.ok(a.store.has(a.key, m.id, 'ui-notified'));
+    assert.equal(a.store.list<any>('sessions')[0].assigned, true); assert.match(a.tool('git push').reason, /deliver to R-Test/);
+  } finally { a.stop(); }
+  const b = busFixture({ root, id: 'L1', wrapper: '901001', inboxDir: inbox, processVersion: '2021-01-01T00:00:00.000Z' });
+  try { await b.start(); assert.equal(b.notices.length, 0); assert.doesNotMatch(b.emit('before_agent_start').message.content, /ci subject/); assert.equal(b.store.has(b.key, m.id, 'delivered'), false); }
+  finally { b.stop(); }
+  unlinkSync(join(dir, 'L1.status')); mkdirSync(join(dir, 'L1.status'));
+  const c = busFixture({ root, id: 'L1', inboxDir: inbox });
+  try { await c.start(); putMessage(c, 'info'); c.tick(); assert.equal(c.sent.length, 1); assert.equal(c.notices.length, 0); }
+  finally { c.stop(); }
 });

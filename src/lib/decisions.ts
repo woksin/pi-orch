@@ -48,7 +48,8 @@ export function freezeSet(pending: Delivery[], batch: Repo['batch'], time = Date
   return ids;
 }
 export const formatMessage = (m: Message) => `[orch ${m.kind} from ${m.from}] ${m.subject}\n${m.body}\n→ ack with order_ack/order_decline (id ${m.id})`;
-export const immediateL0 = (m: Message) => ['question', 'escalation', 'idle'].includes(m.kind) || (m.kind === 'report' && m.requiresAck);
+export const maintenance = (m: Message) => !m.requiresAck && ['info', 'ci', 'ack', 'digest'].includes(m.kind);
+export const immediateL0 = (m: Message) => !maintenance(m);
 export const overdue = (m: Message, time = Date.now(), grace = 0) => time >= Date.parse(m.createdAt) + (m.ackDeadlineMin + grace) * 60000;
 export function deliveryBatch(messages: Message[], id: string, has: (msg: string, state: string) => boolean, lastDigest: number, time = Date.now()) {
   const fresh = messages.filter(m => !has(m.id, 'delivered'));

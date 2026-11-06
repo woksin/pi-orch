@@ -1,11 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { existsSync, mkdirSync, unlinkSync, watch } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { canonical } from '../lib/paths.ts';
 import { atomic, now, readJson, Store } from '../lib/store.ts';
 import type { Message } from '../lib/store.ts';
-import { deliveryBatch, formatMessage, guard, holds, phaseGuard } from '../lib/decisions.ts';
+import { deliveryBatch, formatMessage, guard, holds, maintenance, phaseGuard } from '../lib/decisions.ts';
 import { active, admitBootstrap, config, identity, metadata, sessionKey } from '../lib/discovery.ts';
 import { sameBinding } from '../lib/identity.ts';
 import type { Binding } from '../lib/identity.ts';
@@ -105,9 +105,47 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     const data: any = status(store, current.id, current.repo), cand = data.candidates?.at(-1);
     context.ui.setStatus('orch', `orch ${current.id} · ${unacked().length} unacked${data.holds?.length ? ' · hold' : ''} · cand ${cand?.name || '-'} ${data.gh?.prs?.find((p: any) => p.number === cand?.pr)?.ci || 'unknown'}`);
   }
+  function parked() {
+    if (!current.assigned || !/^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(current.id)) return false;
+    const root = env.LANE_STATUS_DIR || join(env.INBOX_DIR || join(homedir(), 'inbox'), 'status');
+    try {
+      const line = readFileSync(join(root, `${current.id}.status`), 'utf8').split('\n')[0];
+      const match = /^(waiting-on|barred-by) ".*" until (\S+)$/.exec(line);
+      if (line === 'parked') return true;
+      if (!match) return false;
+      return Date.parse(match[2]) > clock();
+    } catch { return false; }
+  }
+  function quietSession() {
+    return current.assigned && current.role !== 'l0' && (env.PI_ORCH_INTERACTIVE === '1' || parked());
+  }
+  function maintenanceNotice(messages: Message[], digest = false) {
+    const summary = messages.map(m => `${m.kind} from ${m.from}: ${m.subject}`).join('; ');
+    context!.ui.notify(`[orch ${digest ? 'digest' : 'maintenance'}] ${summary} — use orch_status for details`, 'info');
+  }
   function sendOnce(entry: Entry, receipt: string, body: string) {
     // Claim before sending: a crash/throw cannot repeat a turn every scan. See README for the loss window.
     if (store.record(entry.box, entry.message.id, receipt)) pi.sendUserMessage(body, { deliverAs: 'followUp' });
+  }
+  function deliverImmediate(messages: Message[], byId: Map<string, Entry>) {
+    const quiet = quietSession(), notices: Message[] = [];
+    for (const m of messages) {
+      const entry = byId.get(m.id)!;
+      if (quiet && maintenance(m)) {
+        if (store.record(entry.box, m.id, 'ui-notified')) notices.push(m);
+      } else if (!store.has(entry.box, m.id, 'ui-notified')) sendOnce(entry, 'delivered', formatMessage(m));
+    }
+    if (notices.length) maintenanceNotice(notices);
+  }
+  function pendingMaintenance() {
+    if (current.role === 'l0') return [];
+    return entries().filter(e => maintenance(e.message) && store.has(e.box, e.message.id, 'ui-notified') && !store.has(e.box, e.message.id, 'delivered'));
+  }
+  function roleNote() {
+    const signature = JSON.stringify(current);
+    if (!current.assigned || promptIdentity === signature) return [];
+    promptIdentity = signature;
+    return [`Orch role ${current.role} (${current.id}). Orders arrive as messages; use order_ack/orch_status. Owners reconcile at session start.`];
   }
   function scan() {
     if (!primary || busy || !context || !active(store, context.cwd, env)) return;
@@ -118,11 +156,11 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
       const all = entries(), byId = new Map(all.map(e => [e.message.id, e]));
       const digestFile = store.path('bus', `${skey}.digest.json`), lastDigest = readJson<any>(digestFile, { at: 0 }).at;
       const batch = deliveryBatch(all.map(e => e.message), current.role === 'l0' ? 'L0' : current.id, (msg, state) => { const e = byId.get(msg)!; return store.has(e.box, msg, state); }, lastDigest, clock());
-      for (const m of batch.immediate) sendOnce(byId.get(m.id)!, 'delivered', formatMessage(m));
+      deliverImmediate(batch.immediate, byId);
       if (batch.digest.length) {
         const claimed = batch.digest.filter(m => store.record(byId.get(m.id)!.box, m.id, 'delivered'));
         atomic(digestFile, { at: clock() });
-        if (claimed.length) pi.sendUserMessage(`[orch digest]\n${claimed.map(formatMessage).join('\n\n')}`, { deliverAs: 'followUp' });
+        if (claimed.length) maintenanceNotice(claimed, true);
       }
       for (const m of batch.reminders) sendOnce(byId.get(m.id)!, 'reminded', `[orch reminder]\n${formatMessage(m)}`);
       heartbeat();
@@ -186,10 +224,11 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
   pi.on('before_agent_start', (_event, ctx) => {
     if (!isPrimary(ctx)) return;
     refreshIdentity();
-    const signature = JSON.stringify(current);
-    if (!current.assigned || promptIdentity === signature) return;
-    promptIdentity = signature;
-    return { message: { customType: 'orch-role', content: `Orch role ${current.role} (${current.id}). Orders arrive as messages; use order_ack/orch_status. Owners reconcile at session start.`, display: false } };
+    if (handoff(sessionId)) return;
+    const claimed = pendingMaintenance().filter(e => store.record(e.box, e.message.id, 'delivered'));
+    const content = claimed.length ? [`[orch maintenance]\n${claimed.map(e => formatMessage(e.message)).join('\n\n')}`] : [];
+    content.push(...roleNote());
+    if (content.length) return { message: { customType: claimed.length ? 'orch-maintenance' : 'orch-role', content: content.join('\n\n'), display: false } };
   });
   pi.on('tool_call', (event, ctx) => {
     const scoped = active(store, ctx.cwd, env);

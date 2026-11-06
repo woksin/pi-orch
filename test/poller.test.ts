@@ -30,8 +30,8 @@ test('poller transitions + closed PR view + escalation + stale digest + rate bac
     const [acked] = s.send({ from: 'L0', to: 'L2', kind: 'order', subject: 'acked', body: 'work', requiresAck: true, ackDeadlineMin: 1 }); s.record('L2', acked.id, 'acked');
     const [declined] = s.send({ from: 'L0', to: 'L3', kind: 'order', subject: 'declined', body: 'work', requiresAck: true, ackDeadlineMin: 1 }); s.record('L3', declined.id, 'declined');
     atomic(s.path('heartbeats', 'L1.json'), { id: 'L1', at: new Date(time - 700000).toISOString(), pid: process.pid });
-    pollOnce(s, time + 17 * 60000); assert.ok(s.has('L1', m.id, 'escalated')); assert.equal(s.messages('L0').length, 2);
-    pollOnce(s, time + 18 * 60000); assert.equal(s.messages('L0').length, 2); pollOnce(s, time + 48 * 60000); assert.equal(s.messages('L0').length, 3);
+    pollOnce(s, time + 17 * 60000); assert.ok(s.has('L1', m.id, 'escalated')); assert.equal(s.messages('L0').length, 3);
+    pollOnce(s, time + 18 * 60000); assert.equal(s.messages('L0').length, 3); pollOnce(s, time + 48 * 60000); assert.equal(s.messages('L0').length, 4);
     writeFileSync(f.ghData, JSON.stringify({ error: 'HTTP 429 too many requests' })); assert.equal(pollOnce(s, time + 49 * 60000).errors.length, 1);
     const count = readFileSync(f.ghCalls, 'utf8').split('\n').length; pollOnce(s, time + 50 * 60000); assert.equal(readFileSync(f.ghCalls, 'utf8').split('\n').length, count);
     assert.equal(readJson<any>(s.path('poller-state.json')).backoff.Test, time + 59 * 60000);
@@ -58,3 +58,33 @@ test('N1: each poller tick prunes dead and reused assignment bindings, including
     assert.equal(existsSync(f.store.path('locks', 'assignments.lock')), false);
   } finally { f.restore(); }
 });
+
+for (const owner of ['live', 'stale-heartbeat', 'dead', 'reused', 'unverifiable', 'absent', 'invalid', 'legacy']) {
+  test(`CI failure fallback: ${owner} owner binding and persisted edge dedupe`, () => {
+    const f = fixture();
+    try {
+      const s = f.store, time = Date.now(), ci = () => s.messages('L0').filter(m => m.kind === 'ci');
+      s.saveCandidate({ name: 'Test-owner', repo: 'Test', branch: 'cand/Test-owner', base: 'base', headSha: 'head', createdAt: now(), members: [], bounced: [], express: false, pr: 10 });
+      if (!['absent', 'legacy'].includes(owner)) atomic(s.path('assignments', 'p42.json'), { key: 'p42', id: 'R-Test', role: owner === 'invalid' ? 'lane' : 'owner', repo: 'Test', binding: { pid: 42, start: owner === 'reused' ? 'old' : 'start' } });
+      // A heartbeat alone must neither prove nor disprove a live process binding.
+      atomic(s.path('heartbeats', 'p42.json'), { id: 'R-Test', at: new Date(time - 1000000).toISOString(), pid: 42 });
+      if (owner === 'legacy') atomic(s.path('owners.json'), { Test: 'R-Test' });
+      const options = { alive: () => owner !== 'dead', start: () => owner === 'unverifiable' ? undefined : 'start' };
+      const pr = { number: 10, headRefName: 'cand/Test-owner', headRefOid: 'head', statusCheckRollup: [{ conclusion: 'FAILURE' }] };
+      writeFileSync(f.ghData, JSON.stringify({ list: [pr] }));
+      assert.deepEqual(pollOnce(s, time, options).errors, []);
+      assert.equal(s.messages('R-Test').filter(m => m.kind === 'ci').length, 1);
+      assert.equal(ci().length, ['live', 'stale-heartbeat'].includes(owner) ? 0 : 1, owner);
+      const count = ci().length;
+      pollOnce(s, time + 120000, options); assert.equal(ci().length, count); // Fresh call reads persisted state.
+      for (const [i, conclusion] of ['SUCCESS', 'FAILURE'].entries()) {
+        writeFileSync(f.ghData, JSON.stringify({ list: [{ ...pr, statusCheckRollup: [{ conclusion }] }] }));
+        pollOnce(s, time + (i + 2) * 120000, options);
+      }
+      assert.equal(s.messages('R-Test').filter(m => m.kind === 'ci').length, 3);
+      assert.equal(ci().length, count * 2, owner);
+      writeFileSync(f.ghData, JSON.stringify({ list: [], view: { ...pr, state: 'MERGED' } }));
+      pollOnce(s, time + 600000, options); assert.equal(ci().length, count * 2);
+    } finally { f.restore(); }
+  });
+}
