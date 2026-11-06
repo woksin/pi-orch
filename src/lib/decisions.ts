@@ -47,16 +47,20 @@ export function freezeSet(pending: Delivery[], batch: Repo['batch'], time = Date
   }
   return ids;
 }
-export const formatMessage = (m: Message) => `[orch ${m.kind} from ${m.from}] ${m.subject}\n${m.body}\n→ ack with order_ack/order_decline (id ${m.id})`;
-export const maintenance = (m: Message) => !m.requiresAck && ['info', 'ci', 'ack', 'digest'].includes(m.kind);
-export const immediateL0 = (m: Message) => !maintenance(m);
+export const formatMessage = (m: Message) => `[orch ${m.kind} from ${m.from}] ${m.subject}\n${m.body}\n${m.requiresAck ? '→ ack with order_ack/order_decline' : '→ message'} (id ${m.id})`;
+export function deliveryPolicy(m: Message): { actionable: boolean; urgent: boolean } {
+  // These bounded tokens only promote presentation urgency; they confer no authority.
+  const safety = /\b(?:safety|security|hold|release|rule|order|question|escalation|blocker|blocked|ack[ -]required|requires? ack(?:nowledg(?:e)?ment)?)\b/i;
+  const urgent = m.requiresAck || !!m.blocks?.length || ['hold', 'release', 'rule', 'order', 'question', 'escalation', 'safety', 'security'].includes(m.kind) || safety.test(`${m.subject}\n${m.body}`);
+  return { actionable: urgent || !['info', 'ack'].includes(m.kind), urgent };
+}
 export const overdue = (m: Message, time = Date.now(), grace = 0) => time >= Date.parse(m.createdAt) + (m.ackDeadlineMin + grace) * 60000;
-export function deliveryBatch(messages: Message[], id: string, has: (msg: string, state: string) => boolean, lastDigest: number, time = Date.now()) {
+export function deliveryBatch(messages: Message[], has: (msg: string, state: string) => boolean, time = Date.now()) {
   const fresh = messages.filter(m => !has(m.id, 'delivered'));
-  const immediate = fresh.filter(m => id !== 'L0' || immediateL0(m));
-  const digest = id === 'L0' && time - lastDigest >= 600000 ? fresh.filter(m => !immediateL0(m)) : [];
+  const actionable = fresh.filter(m => deliveryPolicy(m).actionable);
+  const deferred = fresh.filter(m => !deliveryPolicy(m).actionable);
   const reminders = messages.filter(m => m.requiresAck && has(m.id, 'delivered') && !['acked', 'declined', 'done', 'reminded'].some(s => has(m.id, s)) && overdue(m, time));
-  return { immediate, digest, reminders };
+  return { actionable, deferred, reminders };
 }
 export function holds(messages: Message[], repo?: string): Block[] {
   const active = new Set<Block>();
