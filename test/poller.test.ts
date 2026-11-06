@@ -24,6 +24,55 @@ function healthFixture() {
   return { ...f, s, time, statusDir, options, add, notices, poll: (at = time) => pollOnce(s, at, options) };
 }
 
+const invalidHealthRecords: { name: string; change: (s: any, hb: any) => void; duplicate?: boolean; missing?: boolean }[] = [
+  { name: 'different live heartbeat host', change: (_s, hb) => { hb.pid = 22; } },
+  { name: 'missing registration', change: () => {}, missing: true },
+  { name: 'duplicate registration', change: () => {}, duplicate: true },
+  { name: 'missing binding', change: s => { delete s.processIdentity; } },
+  { name: 'missing binding start', change: s => { delete s.processIdentity.start; } },
+  { name: 'wrong binding PID', change: s => { s.processIdentity.pid = 33; } },
+  { name: 'missing host start', change: s => { delete s.hostStart; } },
+  { name: 'inconsistent host start', change: s => { s.hostStart = 'other'; } },
+  { name: 'invalid role', change: s => { s.kind = 'owner'; } },
+  { name: 'heartbeat key mismatch', change: (_s, hb) => { hb.key = 'p22'; } },
+  { name: 'heartbeat ID mismatch', change: (_s, hb) => { hb.id = 'L2'; } },
+  { name: 'heartbeat binding mismatch', change: (_s, hb) => { hb.processIdentity = { pid: 11, start: 'other' }; } },
+  { name: 'heartbeat host start mismatch', change: (_s, hb) => { hb.hostStart = 'other'; } },
+  { name: 'heartbeat session mismatch', change: (s, hb) => { s.sessionId = 'first'; hb.sessionId = 'second'; } },
+  ...[undefined, null, 0, -11, 11.5, '11', Number.MAX_SAFE_INTEGER + 1].map(pid => ({
+    name: `invalid matching host PID ${String(pid)}`, change: (s: any, hb: any) => { s.pid = hb.pid = pid; s.processIdentity.pid = pid; }
+  })),
+  ...[0, -111, 111.5, '111'].map(pid => ({
+    name: `invalid matching wrapper PID ${String(pid)}`, change: (s: any, hb: any) => { s.wrapperPid = hb.wrapperPid = pid; s.processIdentity.pid = pid; }
+  }))
+];
+for (const scenario of invalidHealthRecords) {
+  test(`health fails closed to uncertain/L0 for ${scenario.name}`, () => {
+    const f = healthFixture(); try {
+      const key = f.add('L1', 11), path = f.s.path('sessions', `${key}.json`), heartbeat = f.s.path('heartbeats', `${key}.json`);
+      const s = readJson<any>(path), hb = readJson<any>(heartbeat); scenario.change(s, hb);
+      atomic(path, s); atomic(heartbeat, hb);
+      if (scenario.missing) unlinkSync(path);
+      if (scenario.duplicate) atomic(f.s.path('sessions', 'duplicate.json'), s);
+      // The registered host is dead, but a mismatched heartbeat may name a live host.
+      f.options.alive = pid => pid === 900 || pid === 22;
+      assert.deepEqual(f.poll().errors, []);
+      assert.equal(f.notices('R-Test').length, 0); assert.equal(f.notices('L0').length, 1);
+      const notice = f.notices('L0')[0]; assert.match(notice.body, /uncertain/); assert.doesNotMatch(notice.body, /: dead;/);
+      assert.equal((notice.refs!.subjects as any[])[0].classification, 'uncertain');
+      f.poll(); assert.equal(f.notices('L0').length, 1); // Persisted uncertainty is an edge, not a repeated alert.
+    } finally { f.restore(); }
+  });
+}
+
+test('health retains death proof for matching bound records without parked intent', () => {
+  const f = healthFixture(); try {
+    f.add('L1', 11); f.options.alive = pid => pid !== 11;
+    assert.deepEqual(f.poll().errors, []); assert.equal(f.notices('L0').length, 0); assert.equal(f.notices('R-Test').length, 1);
+    assert.match(f.notices('R-Test')[0].body, /L1: dead;/); f.poll(); assert.equal(f.notices('R-Test').length, 1);
+  } finally { f.restore(); }
+});
+
 test('health groups accountable recipients, dedupes persisted edges and silently clears/reopens', () => {
   const f = healthFixture(); try {
     const { s, time } = f; atomic(s.path('repos.json'), { ...s.repos(), Other: { ...s.repo('Test'), enrolled: false } });

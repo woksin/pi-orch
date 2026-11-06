@@ -62,7 +62,16 @@ function healthSnapshot(store: Store) {
 type HealthSnapshot = ReturnType<typeof healthSnapshot>;
 interface HealthContext { snapshot: HealthSnapshot; repos: ReturnType<Store['repos']>; options: DiscoveryOptions; time: number }
 interface HealthIncident { key: string; target: string; edge: HealthEdge; subject: Record<string, unknown>; text: string }
+const healthPid = (pid: unknown): pid is number => typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0;
+function healthProcessRecord(s: any) {
+  if (!s || !healthPid(s.pid) || s.wrapperPid != null && !healthPid(s.wrapperPid)) return false;
+  const binding = s.processIdentity;
+  if (typeof binding?.start !== 'string' || !binding.start.trim() || binding.pid !== (s.wrapperPid || s.pid)) return false;
+  if (typeof s.hostStart !== 'string' || !s.hostStart.trim()) return false;
+  return !!s.wrapperPid || binding.start === s.hostStart;
+}
 function healthProcess(s: any, options: DiscoveryOptions) {
+  if (!healthProcessRecord(s)) return { dead: false, verified: false };
   const alive = options.alive || pidAlive, host = alive(s.pid), wrapper = !!s.wrapperPid && alive(s.wrapperPid);
   const dead = !host && !wrapper, binding = s.processIdentity;
   if (dead || !binding?.start || binding.pid !== (s.wrapperPid || s.pid)) return { dead, verified: false };
@@ -70,9 +79,11 @@ function healthProcess(s: any, options: DiscoveryOptions) {
   return { dead, verified: matchingHost && options.start!(binding.pid) === binding.start };
 }
 function matchingRegistration(s: any, hb: any) {
-  if (!s || s.pid !== hb.pid || s.wrapperPid !== hb.wrapperPid || s.id !== hb.id) return false;
+  if (!healthProcessRecord(s) || s.pid !== hb.pid || s.wrapperPid !== hb.wrapperPid || s.id !== hb.id) return false;
   if (hb.key && s.key !== hb.key) return false;
-  return sameBinding(s.processIdentity, s.processIdentity);
+  if (hb.processIdentity !== undefined && !sameBinding(s.processIdentity, hb.processIdentity)) return false;
+  if (hb.hostStart !== undefined && s.hostStart !== hb.hostStart) return false;
+  return hb.sessionId === undefined || s.sessionId === hb.sessionId;
 }
 function registeredIdentity(s: any, options: DiscoveryOptions) {
   if (!s.assigned) return undefined;
@@ -99,6 +110,7 @@ function healthOwnerLive(repo: string, ctx: HealthContext) {
   return identity?.role === 'owner' && identity.repo === repo && healthProcess(s, ctx.options).verified;
 }
 function healthClass(hb: any, live: ReturnType<typeof healthProcess>, identity: any, ctx: HealthContext) {
+  if (!identity) return 'uncertain';
   if (live.dead) return 'dead';
   const at = Date.parse(hb.at), status = parking(hb.id, ctx.time, ctx.options.env || process.env);
   if (!live.verified || !identity || !Number.isFinite(at) || at > ctx.time || status === 'uncertain') return 'uncertain';
@@ -111,8 +123,9 @@ function healthTarget(identity: any, live: ReturnType<typeof healthProcess>, ctx
   return healthOwnerLive(identity.repo, ctx) ? `R-${identity.repo}` : 'L0';
 }
 function healthIncident(observation: HealthSnapshot['heartbeats'][number], ctx: HealthContext): HealthIncident | undefined {
-  const { key, hb } = observation, registrations = ctx.snapshot.sessions.filter(s => s.key === key), s = registrations.length === 1 ? registrations[0] : undefined;
-  const identity = healthIdentity(s, hb, ctx), live = healthProcess(s || hb, ctx.options), classification = healthClass(hb, live, identity, ctx);
+  const { key, hb } = observation, registrations = ctx.snapshot.sessions.filter(s => s.key === key);
+  const candidate = registrations.length === 1 ? registrations[0] : undefined, s = matchingRegistration(candidate, hb) ? candidate : undefined;
+  const identity = healthIdentity(s, hb, ctx), live = healthProcess(s, ctx.options), classification = healthClass(hb, live, identity, ctx);
   if (!classification) return undefined;
   const target = healthTarget(identity, live, ctx), binding = s?.processIdentity;
   const processId = binding?.start ? { pid: binding.pid, start: binding.start, hostPid: hb.pid } : { key, pid: hb.pid };
