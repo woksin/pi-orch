@@ -2,10 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { existsSync, mkdirSync, unlinkSync, watch } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { shellGuard } from '../lib/shell-invocations.ts';
 import { canonical } from '../lib/paths.ts';
 import { atomic, now, readJson, Store } from '../lib/store.ts';
 import type { Message } from '../lib/store.ts';
-import { deliveryBatch, formatMessage, guard, holds, phaseGuard } from '../lib/decisions.ts';
+import { deliveryBatch, deliveryPolicy, formatMessage, guard, holds, phaseGuard } from '../lib/decisions.ts';
 import { active, admitBootstrap, config, identity, metadata, sessionKey } from '../lib/discovery.ts';
 import { sameBinding } from '../lib/identity.ts';
 import type { Binding } from '../lib/identity.ts';
@@ -105,9 +106,32 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     const data: any = status(store, current.id, current.repo), cand = data.candidates?.at(-1);
     context.ui.setStatus('orch', `orch ${current.id} · ${unacked().length} unacked${data.holds?.length ? ' · hold' : ''} · cand ${cand?.name || '-'} ${data.gh?.prs?.find((p: any) => p.number === cand?.pr)?.ci || 'unknown'}`);
   }
-  function sendOnce(entry: Entry, receipt: string, body: string) {
-    // Claim before sending: a crash/throw cannot repeat a turn every scan. See README for the loss window.
-    if (store.record(entry.box, entry.message.id, receipt)) pi.sendUserMessage(body, { deliverAs: 'followUp' });
+  function pendingMaintenance() {
+    return entries().filter(e => !deliveryPolicy(e.message).actionable && !store.has(e.box, e.message.id, 'delivered'));
+  }
+  function report(error: unknown, generation = epoch) {
+    if (generation !== epoch) return;
+    try { context?.ui.notify(`orch: ${error}`, 'error'); } catch { /* Presentation cannot retry a claimed delivery. */ }
+  }
+  function dispatch(claimed: { message: Message; reminder: boolean }[], generation: number) {
+    if (!claimed.length || generation !== epoch) return;
+    const body = claimed.map(e => `${e.reminder ? '[orch reminder]\n' : ''}${formatMessage(e.message)}`).join('\n\n');
+    const deliverAs = claimed.some(e => deliveryPolicy(e.message).urgent) ? 'steer' : 'followUp';
+    // SDK 1.3 returns void and reports native errors through onError. Observe promise-returning adapters too.
+    const pending = pi.sendUserMessage(body, { deliverAs }) as unknown;
+    if (pending && typeof (pending as Promise<void>).then === 'function') void Promise.resolve(pending).catch(error => report(error, generation));
+  }
+  function maintenanceNotice(deferred: Entry[]) {
+    const claimed = deferred.filter(e => store.record(e.box, e.message.id, 'ui-notified'));
+    if (!claimed.length) return;
+    const summary = claimed.map(e => `${e.message.kind} from ${e.message.from}: ${e.message.subject}`).join('; ');
+    try { context!.ui.notify(`[orch maintenance] ${summary} — use orch_status for details`, 'info'); } catch (error) { report(error); }
+  }
+  function roleNote() {
+    const signature = JSON.stringify(current);
+    if (!current.assigned || promptIdentity === signature) return [];
+    promptIdentity = signature;
+    return [`Orch role ${current.role} (${current.id}). Orders arrive as messages; use order_ack/orch_status. Owners reconcile at session start.`];
   }
   function scan() {
     if (!primary || busy || !context || !active(store, context.cwd, env)) return;
@@ -115,20 +139,21 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     if (handoff(sessionId)) return;
     busy = true;
     try {
-      const all = entries(), byId = new Map(all.map(e => [e.message.id, e]));
-      const digestFile = store.path('bus', `${skey}.digest.json`), lastDigest = readJson<any>(digestFile, { at: 0 }).at;
-      const batch = deliveryBatch(all.map(e => e.message), current.role === 'l0' ? 'L0' : current.id, (msg, state) => { const e = byId.get(msg)!; return store.has(e.box, msg, state); }, lastDigest, clock());
-      for (const m of batch.immediate) sendOnce(byId.get(m.id)!, 'delivered', formatMessage(m));
-      if (batch.digest.length) {
-        const claimed = batch.digest.filter(m => store.record(byId.get(m.id)!.box, m.id, 'delivered'));
-        atomic(digestFile, { at: clock() });
-        if (claimed.length) pi.sendUserMessage(`[orch digest]\n${claimed.map(formatMessage).join('\n\n')}`, { deliverAs: 'followUp' });
+      const generation = epoch, all = entries(), deferred: Entry[] = [], claimed: { message: Message; reminder: boolean }[] = [];
+      for (const e of all) {
+        const batch = deliveryBatch([e.message], (msg, receipt) => store.has(e.box, msg, receipt), clock());
+        if (batch.deferred.length) deferred.push(e);
+        // Claim every constituent before the single native call (including its shared crash-loss window).
+        if (batch.actionable.length && store.record(e.box, e.message.id, 'delivered')) claimed.push({ message: e.message, reminder: false });
+        if (batch.reminders.length && store.record(e.box, e.message.id, 'reminded')) claimed.push({ message: e.message, reminder: true });
       }
-      for (const m of batch.reminders) sendOnce(byId.get(m.id)!, 'reminded', `[orch reminder]\n${formatMessage(m)}`);
+      dispatch(claimed, generation);
+      if (generation !== epoch) return;
+      maintenanceNotice(deferred);
       heartbeat();
     } finally { busy = false; }
   }
-  function safelyScan() { try { scan(); } catch (e) { context?.ui.notify(`orch: ${e}`, 'error'); } }
+  function safelyScan() { try { scan(); } catch (e) { report(e); } }
   function stop() {
     epoch++;
     context?.ui.setStatus('orch', undefined);
@@ -186,12 +211,13 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
   pi.on('before_agent_start', (_event, ctx) => {
     if (!isPrimary(ctx)) return;
     refreshIdentity();
-    const signature = JSON.stringify(current);
-    if (!current.assigned || promptIdentity === signature) return;
-    promptIdentity = signature;
-    return { message: { customType: 'orch-role', content: `Orch role ${current.role} (${current.id}). Orders arrive as messages; use order_ack/orch_status. Owners reconcile at session start.`, display: false } };
+    if (handoff(sessionId)) return;
+    const claimed = pendingMaintenance().filter(e => store.record(e.box, e.message.id, 'delivered'));
+    const content = claimed.length ? [`[orch maintenance]\n${claimed.map(e => formatMessage(e.message)).join('\n\n')}`] : [];
+    content.push(...roleNote());
+    if (content.length) return { message: { customType: claimed.length ? 'orch-maintenance' : 'orch-role', content: content.join('\n\n'), display: false } };
   });
-  pi.on('tool_call', (event, ctx) => {
+  pi.on('tool_call', shellGuard((event, ctx) => {
     const scoped = active(store, ctx.cwd, env);
     if (!scoped && !env.PI_ORCH_ID) return;
     notifyConfig(ctx);
@@ -209,7 +235,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
       const reason = guard(command, kind, ctx.hasUI !== false, guarded.repo, holds(own, guarded.repo));
       if (reason) return { block: true, reason };
     }
-  });
+  }, (_event, ctx) => !!active(store, ctx.cwd, env) || !!env.PI_ORCH_ID));
   function register(name: string, properties: Record<string, unknown>, required: string[], execute: (p: any, ctx: ExtensionContext) => unknown) {
     pi.registerTool({ name, defaultActive: false, label: name, description: name.replaceAll('_', ' '), parameters: { type: 'object', properties, required, additionalProperties: false } as any,
       async execute(_callId, p, _signal, _update, ctx) { if (!isPrimary(ctx)) throw new Error('orders belong to the primary session'); refreshIdentity(); return result(execute(p, ctx)); } });

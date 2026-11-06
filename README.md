@@ -42,6 +42,8 @@ Set these **before launching** pi/pi-session; wrapper relaunches retain them:
 | `ORCH_HOME` | Defaults to `~/.pi/orch`. Tests always use a temporary home. |
 | `ORCH_NODE` | Optional executable override for bin scripts; default is the pilot's Node 26.8.1 absolute path. |
 | `PI_SESSION_WRAPPER_PID` | pi-session wrapper PID: stable session key `w<PID>`; otherwise `p<host-pid>`. |
+| `PI_ORCH_INTERACTIVE` | Legacy hint; informational delivery is non-waking for all roles, with or without this flag. |
+| `LANE_STATUS_DIR` | Shared `<safe-id>.status` parking directory; otherwise `INBOX_DIR/status`, then `~/.pi/agent/lane-status`. |
 
 Activation requires cwd under a `config.json` root, not under an exclude, and no
 opt-out. No config/roots means no discovery/delivery. Explicit lane guards still apply outside roots, under excludes/optout and without config. Malformed config is dormant and reported once, not thrown from load/tool handlers.
@@ -70,15 +72,36 @@ receive only ALL broadcasts and addressed orders, with **no publication/watch
 guards** except the configured phaseWindow. Assignment starts lane/owner guards. The five tools and status line are activated only for assigned sessions or sessions with an addressed message; active-tool updates hide them from other prompts, preserving unrelated tools.
 
 The bus scans at session start/agent_end, watches inboxes/assignments, polls every
-20s and heartbeats every 30s. followUp delivery starts an idle turn or queues while
-streaming. Context-budget `~/.pi/agent/context-budget/status/<sessionId>.json`
-defers delivery during active handoff; missing/unreadable status permits delivery.
-Receipts are claimed **before** send: each delivery/reminder is at-most-once, so a
-send throw or crash cannot cause turn spam. A crash between claim and send can
-lose that wake; pi offers no transaction with the filesystem. Outstanding acks
-remain visible and can remind/escalate. One deadline reminder; escalation after
-+15min. L0 questions/escalations/idle and ack-required reports are immediate; other
-messages form at most one digest per ten minutes (throttle survives restarts).
+20s and heartbeats every 30s. Each scan sends at most **one actionable batch**,
+including due reminders, preserving every constituent's ID, sender, kind, subject
+and full body. There is no debounce timer: separate scans can still wake separately.
+Orders, rules, questions, escalations, holds/releases, safety/security, blocks and
+ACK-required messages promote the whole batch to native `steer` delivery at the
+next safe busy boundary. Other actions use `followUp`; either starts an idle run.
+Reports, idle, CI, digests and unknown kinds remain actionable by default. Only
+plain `info`/`ack` without ACK requirements or blocks are eligible to defer;
+bounded safety/blocker/hold/rule/ACK-required text conservatively promotes them.
+Text only promotes delivery urgency; it never grants authority or changes guards.
+Only ACK-required messages include order_ack/order_decline instructions.
+
+Safe informational/receipt entries never start or extend a run, for L0, owners
+and lanes, regardless of interactivity or parking. An optional compact UI notice
+points to `orch_status`; its `ui-notified` receipt is not model consumption.
+The durable inbox remains pending until one non-displayed `before_agent_start`
+context message on the next legitimate primary run, combined with any role note.
+This survives shutdown/reload before that run; there is no L0 timed digest wake.
+Workers, out-of-scope sessions and active handoffs cannot drain it. Context-budget
+`~/.pi/agent/context-budget/status/<sessionId>.json` defers delivery during handoff;
+missing/unreadable handoff status permits delivery.
+
+Delivery/reminder receipts are claimed **before** the single send, and context
+receipts before returning the hidden batch. Claims suppress re-entry, restart,
+throw/rejection and abort replay. A crash between claim and native acceptance can
+lose the **whole claimed batch**; pi has no transaction with the filesystem.
+UI notification also claims first and is best effort. These are at-most-once
+attempts, not exactly-once delivery. Inbox details remain in `orch_status`.
+Quiet delivery is not semantic acceptance: no ACK, decline or done is inferred.
+Outstanding ACKs retain one deadline reminder and escalation after +15min.
 Shutdown closes watchers/timers and removes only the session's own heartbeat.
 
 Tools: `order_ack {id,plan}`, `order_decline {id,reason}`,
@@ -131,12 +154,12 @@ realpaths, including symlinks and macOS /var vs /private/var aliases.
 - `sessions/<key>.json`: current identity, repo, sessionId, pid, wrapperPid, cwd, startedAt, hostStart and processIdentity.
 - `heartbeats/<key>.json`: overwritten liveness/state, last turn end, unacked IDs.
 - `inbox/<id>/<msgId>.json`: immutable message; ID `yyyymmddThhmmss-from-xxxx`.
-- `receipts/<id>/<msgId>.<state>.json`: immutable delivered/acked/declined/done/reminded/escalated transitions.
+- `receipts/<id>/<msgId>.<state>.json`: immutable ui-notified/delivered/acked/declined/done/reminded/escalated transitions.
 - `deliveries/<Repo>/<dId>.json`: immutable delivery with issue/branch/SHA/deps/notes/intent/gate log.
 - `deliveries/<Repo>/<dId>.status.<n>.json`: append-only status; highest number wins.
 - `cands/<Repo>/<name>.json`: candidate; members freeze at build, head advances only via sync.
 - `gh/<Repo>.json`: overwritten poller cache, `at` and `prs` (state/head/CI).
-- `bus/<key>.digest.json`, `poller-state.json`: digest/backoff timestamps.
+- `poller-state.json`: per-repo backoff and heartbeat-health episode edges. Old `staleDigestAt`/bus digest files are ignored.
 - `locks/<Repo>.lock`, `poller.lock`, transient `*.lock` and `*.tmp`: exclusive locks/atomic writes.
 
 Mutable writes use tmp+rename; immutable facts use tmp+hard-link (concurrent
@@ -242,9 +265,33 @@ heartbeat <=90s old and a verified live process start identity. An assignment re
 
 Each 120s tick performs one open-PR list per enrolled repo, plus one view for a
 candidate PR newly missing from the open list. Cache CI transitions SUCCESS,
-FAILURE, MERGED wake the owner. No-check rollups remain UNKNOWN (not landable).
-Rate 403/429 backs off that repo ten minutes. Escalations and stale (>10min,
-regardless of PID) heartbeat digests continue; stale digests at most every 30min.
+FAILURE, MERGED notify the owner. FAILURE also goes to L0 when no validated owner
+assignment has a verified live `{pid,start}` binding. Config/legacy owner mappings,
+missing bindings, unverifiable/reused PIDs and heartbeat freshness alone do not
+prove an owner is present. A live owner's stale heartbeat does not trigger this
+fallback. SUCCESS/MERGED remain owner-only; unchanged cached transitions are not
+repeated after restart. Quiet UI presentation never loses the durable owner inbox
+entry. No-check rollups remain UNKNOWN (not landable).
+Rate 403/429 backs off that repo ten minutes; deadline escalations continue.
+Heartbeat health is edge-triggered, not a repeating stale digest. Matching live
+processes with heartbeats over ten minutes old are stale, not presumed dead.
+A live verified host/wrapper with `parked`, or a future bounded `waiting-on` /
+`barred-by` status, is intentionally quiet. Parking never proves liveness: no live
+host/wrapper is dead even if parked; invalid/future timestamps, expired/malformed
+or unreadable hints and unverifiable/reused bindings remain uncertain. Reads use
+safe IDs and bounded nonblocking regular files from the shared status directory.
+Missing status is normal. No health notice instructs a lane to resume.
+
+New adverse edges group into one non-ACK escalation per accountable recipient:
+attributable bound lane incidents go to the verified repo owner; owner/global,
+unknown or ambiguous attribution goes to L0, never ALL or the affected lane.
+Structured refs identify heartbeat-health source, subjects and episodes. Stable
+process binding, classification and recipient determine edges, not changing ages.
+Unchanged incidents stay silent across restarts; healthy/parked-live recovery
+silently clears them, permitting a later incident. Disappearing observations clear
+only notification state, never leases/heartbeats. Failed targets remain retryable
+and successful groups commit independently. Durable send precedes state commit:
+a crash in that window can duplicate an alert (no transactional outbox).
 `orch-poll --once` runs one tick; exit 1 usage, 2 lock/poll errors, 0 success.
 
 ## Verification
@@ -260,10 +307,20 @@ node --test --test-timeout=30000 'test/*.test.ts'
 
 All tests use temporary ORCH_HOME and local bare git origins; fake gh precedes
 PATH. Unit tests exercise pure decisions without pi, and a fake-pi factory test
-verifies dormant/active loading without any live session or model request. Git
-integration cases run in this same suite. `test/check.ts` syntax-checks all TS and
-rejects trailing whitespace; there is no compiler/linter dependency or CI workflow.
-Use pi-phase for both checks under agent execution policy. Regression tests explicitly place worktree aliases in native OS temporary paths, so managed-output paths cannot mask macOS realpath failures. The native package has no configured CI workflow or compiler build gate; local git/fake-gh integrations do not replace live pilot verification.
+verifies dormant/active loading without a live installation. A native SDK fixture
+uses the real resource loader, extension bindings, lifecycle and model loop with
+an isolated local provider: maintenance starts no model call, joins the next
+legitimate turn as one hidden batch after reload, and actionable bursts make one
+request with urgent steering proven across a held native tool boundary. Abort and
+shutdown do not replay claims or leak watchers/timers.
+CI pins Node 26 and SDK 1.3.0. Git/fake-gh integration cases run in the same suite.
+`test/check.ts` syntax-checks all TS and rejects trailing whitespace; there is no
+separate compiler build. The local gates add `npm run check` to CI's `npm test`
+and `npm pack --dry-run`.
+Use pi-phase for checks under agent execution policy. Regression tests explicitly
+place worktree aliases in native OS temporary paths, so managed-output paths
+cannot mask macOS realpath failures. Local integrations do not replace live pilot
+verification.
 
 ## Related projects
 
