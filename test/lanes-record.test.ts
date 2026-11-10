@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Owned } from '../src/lib/lanes-record.ts';
 import { retireLaunchRecord, validRecord, writeLaunchRecord } from '../src/lib/lanes-record.ts';
 
 const tmp = () => mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-'));
@@ -60,17 +61,17 @@ test('a live record of another pid is never replaced or retired', () => {
   put(file, text);
   assert.equal(writeLaunchRecord(env, cwd, 1, live), undefined);
   assert.equal(readFileSync(file, 'utf8'), text);
-  assert.equal(retireLaunchRecord({ id: 'L1', pid: 1, path: file, dir: join(file, '..') }), false);
+  assert.equal(retireLaunchRecord({ id: 'L1', pid: 1, startedAt: '2020-01-01T00:00:00.000Z', path: file, dir: join(file, '..') }), false);
   assert.equal(readFileSync(file, 'utf8'), text);
 });
 
-test('a live pid in a different cwd is kept unless no pi runs there', () => {
+test('a live pid in a different cwd is kept unless no pi runs there', async () => {
   const { env, cwd, file } = setup(), text = rec({ cwd: '/nowhere' });
   put(file, text);
-  assert.equal(writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => ['/nowhere'] }), undefined);
-  assert.equal(writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => undefined }), undefined);
+  assert.equal(await writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => ['/nowhere'] }), undefined);
+  assert.equal(await writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => undefined }), undefined);
   assert.equal(readFileSync(file, 'utf8'), text);
-  assert.ok(writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => ['/elsewhere'] }));
+  assert.ok(await writeLaunchRecord(env, cwd, 1, { alive: () => true, procs: () => ['/elsewhere'] }));
   assert.equal(read(file).pid, 1);
 });
 
@@ -105,7 +106,7 @@ test('a live record of our own pid is not rewritten and stays ours', () => {
 });
 
 test('retire sets retiredAt, keeps fields and is idempotent', () => {
-  const { env, cwd, file } = setup(), owned = writeLaunchRecord(env, cwd, 5)!, start = read(file);
+  const { env, cwd, file } = setup(), owned = (writeLaunchRecord(env, cwd, 5) as Owned), start = read(file);
   assert.ok(retireLaunchRecord(owned, { now: () => new Date('2025-01-02T03:04:05.000Z') }));
   assert.deepEqual(read(file), { ...start, retiredAt: '2025-01-02T03:04:05.000Z' });
   assert.deepEqual(Object.keys(read(file)), ['id', 'pid', 'cwd', 'startedAt', 'retiredAt']);
@@ -115,13 +116,13 @@ test('retire sets retiredAt, keeps fields and is idempotent', () => {
 });
 
 test('retire leaves records that changed owner, vanished or became unsafe', () => {
-  const { env, cwd, file } = setup(), owned = writeLaunchRecord(env, cwd, 5)!;
+  const { env, cwd, file } = setup(), owned = (writeLaunchRecord(env, cwd, 5) as Owned);
   const other = rec({ pid: 6 }); put(file, other);
   assert.equal(retireLaunchRecord(owned), false); assert.equal(readFileSync(file, 'utf8'), other);
-  const gone = setup(), o2 = writeLaunchRecord(gone.env, gone.cwd, 5)!;
+  const gone = setup(), o2 = (writeLaunchRecord(gone.env, gone.cwd, 5) as Owned);
   const dir = join(gone.file, '..'); writeFileSync(join(dir, 'x'), ''); unlinkAll(dir);
   assert.equal(retireLaunchRecord(o2), false); assert.deepEqual(names(dir), []);
-  const sl = setup(), o3 = writeLaunchRecord(sl.env, sl.cwd, 5)!, target = tmp();
+  const sl = setup(), o3 = (writeLaunchRecord(sl.env, sl.cwd, 5) as Owned), target = tmp();
   writeFileSync(join(target, 'L1.json'), rec({ pid: 5 }));
   renameSync(join(sl.lanes, '.state/roster'), join(sl.lanes, '.state/old')); symlinkSync(target, join(sl.lanes, '.state/roster'));
   assert.equal(retireLaunchRecord(o3), false); assert.equal(read(join(target, 'L1.json')).retiredAt, undefined);
@@ -134,3 +135,47 @@ test('output satisfies the consumer registration predicate', () => {
 });
 
 function unlinkAll(dir: string) { for (const n of readdirSync(dir)) rmSync(join(dir, n), { force: true }); }
+
+test('only ENOENT means absent: an unreadable record is neither replaced nor owned', { skip: process.getuid?.() === 0 }, () => {
+  const { env, cwd, file } = setup(), text = rec({ pid: 3 });
+  put(file, text); chmodSync(file, 0);
+  try {
+    assert.equal(writeLaunchRecord(env, cwd, 7, dead), undefined);
+    assert.equal(retireLaunchRecord({ id: 'L1', pid: 3, startedAt: '2020-01-01T00:00:00.000Z', path: file, dir: join(file, '..') }), false);
+  } finally { chmodSync(file, 0o600); }
+  assert.equal(readFileSync(file, 'utf8'), text);
+  assert.deepEqual(names(join(file, '..')), ['L1.json']);
+});
+
+test('retire requires the same startedAt as the record we wrote', () => {
+  const { env, cwd, file } = setup(), owned = writeLaunchRecord(env, cwd, 5) as Owned;
+  assert.equal(owned.startedAt, read(file).startedAt);
+  const replaced = rec({ pid: 5, cwd, startedAt: '2031-01-01T00:00:00.000Z' }); put(file, replaced);
+  assert.equal(retireLaunchRecord(owned), false);
+  assert.equal(readFileSync(file, 'utf8'), replaced);
+});
+
+test('adopting our own record captures its startedAt for retirement', () => {
+  const { env, cwd, file } = setup(); put(file, rec({ pid: 9, cwd }));
+  const owned = writeLaunchRecord(env, cwd, 9, live) as Owned;
+  assert.equal(owned.startedAt, '2020-01-01T00:00:00.000Z');
+  assert.ok(retireLaunchRecord(owned)); assert.ok(read(file).retiredAt);
+});
+
+test('the different-cwd probe is deferred, runs once and writes only after it resolves', async () => {
+  const { env, cwd, file } = setup(), text = rec({ cwd: '/nowhere' }); put(file, text);
+  let calls = 0, release!: (v: string[]) => void;
+  const procs = () => { calls++; return new Promise<string[]>(r => { release = r; }); };
+  const pending = writeLaunchRecord(env, cwd, 1, { alive: () => true, procs });
+  assert.ok(pending instanceof Promise); assert.equal(readFileSync(file, 'utf8'), text);
+  release(['/elsewhere']);
+  assert.ok(await pending); assert.equal(calls, 1); assert.equal(read(file).pid, 1);
+});
+
+test('a failing or rejecting probe never overwrites a live record', async () => {
+  for (const procs of [() => Promise.reject(new Error('ps failed')), () => Promise.resolve(undefined), () => { throw new Error('sync'); }]) {
+    const { env, cwd, file } = setup(), text = rec({ cwd: '/nowhere' }); put(file, text);
+    assert.equal(await writeLaunchRecord(env, cwd, 1, { alive: () => true, procs }), undefined);
+    assert.equal(readFileSync(file, 'utf8'), text);
+  }
+});

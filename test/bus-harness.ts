@@ -5,7 +5,7 @@ import { atomic, Store } from '../src/lib/store.ts';
 import { createLaneBus } from '../src/extension/lane-bus.ts';
 import { sessionKey } from '../src/lib/discovery.ts';
 
-export function busFixture(input: { lanesDir?: string; lanes?: { alive?: (pid: number) => boolean; procs?: () => string[] | undefined }; root?: string; id?: string; wrapper?: string; optout?: string; interactive?: string; statusDir?: string; inboxDir?: string; configured?: boolean; rawConfig?: string; processVersion?: string; metadata?: (...args: any[]) => any; send?: (text: string) => unknown; notify?: (text: string) => void; setup?: (store: Store, key: string) => void } = {}) {
+export function busFixture(input: { lanesDir?: string; lanes?: { alive?: (pid: number) => boolean; procs?: () => string[] | undefined | Promise<string[] | undefined> }; root?: string; id?: string; wrapper?: string; optout?: string; interactive?: string; statusDir?: string; inboxDir?: string; configured?: boolean; rawConfig?: string; processVersion?: string; metadata?: (...args: any[]) => any; send?: (text: string) => unknown; notify?: (text: string) => void; setup?: (store: Store, key: string) => void } = {}) {
   const root = input.root || mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-bus-')), store = new Store(join(root, 'home'));
   if (input.configured !== false) atomic(store.path('config.json'), { roots: [root], excludes: [] });
   if (input.rawConfig !== undefined) writeFileSync(store.path('config.json'), input.rawConfig);

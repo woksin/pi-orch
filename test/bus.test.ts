@@ -430,3 +430,18 @@ test('in-process workers and unset LANES_DIR write no launch record', async () =
   await unset.start();
   assert.equal(existsSync(join(lanesDir, '.state')), false);
 });
+
+test('a deferred launch-record probe does not block start and is retired if shutdown comes first', async () => {
+  const lanesDir = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-bus-')), cwd = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-outside-'));
+  const file = join(lanesDir, '.state/roster/L1.json');
+  mkdirSync(join(lanesDir, '.state/roster'), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ id: 'L1', pid: 4242, cwd: '/nowhere', startedAt: '2020-01-01T00:00:00.000Z' })}\n`);
+  let release!: (v: string[]) => void;
+  const f = busFixture({ id: 'L1', lanesDir, lanes: { alive: () => true, procs: () => new Promise<string[]>(r => { release = r; }) } });
+  await f.start('main', true, cwd);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).pid, 4242);
+  f.stop(); release([]);
+  await new Promise(r => setTimeout(r, 20));
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(record.pid, process.pid); assert.ok(record.retiredAt);
+});

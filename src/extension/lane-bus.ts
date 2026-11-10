@@ -171,8 +171,17 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     if (hb.pid === pid && hb.sessionId === sessionId && existsSync(path)) unlinkSync(path);
   }
   let launchRecord: Owned | undefined;
-  function writeLaunch(cwd: string) { try { launchRecord = writeLaunchRecord(env, cwd, pid, options.lanes); } catch { launchRecord = undefined; } }
-  function retireLaunch() { try { if (launchRecord) retireLaunchRecord(launchRecord, options.lanes); } catch { /* Best effort. */ } launchRecord = undefined; }
+  let pendingLaunch: Promise<void> | undefined;
+  function writeLaunch(cwd: string) {
+    if (pendingLaunch) return; // The process probe is still running for this process.
+    try {
+      const written = writeLaunchRecord(env, cwd, pid, options.lanes);
+      if (!(written instanceof Promise)) { launchRecord = written; return; }
+      pendingLaunch = written.then(owned => { launchRecord = owned; }, () => { launchRecord = undefined; }).finally(() => { pendingLaunch = undefined; });
+    } catch { launchRecord = undefined; }
+  }
+  function retireNow() { try { if (launchRecord) retireLaunchRecord(launchRecord, options.lanes); } catch { /* Best effort. */ } launchRecord = undefined; }
+  function retireLaunch() { if (pendingLaunch) void pendingLaunch.then(retireNow); else retireNow(); }
   pi.on('session_start', (_event, ctx) => {
     if (ctx.hasUI === false) return; // In-process workers must not stop/re-pin their parent's UI session.
     stop(); if (primary) removeHeartbeat(); primary = false;

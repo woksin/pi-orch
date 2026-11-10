@@ -7,14 +7,15 @@ import { pidAlive, piCwds } from './process-probe.ts';
 
 export interface LaunchRecord { id: string; pid: number; cwd: string; startedAt: string; retiredAt?: string }
 export interface Target { id: string; path: string; dir: string }
-export interface Owned extends Target { pid: number }
+export interface Owned extends Target { pid: number; startedAt: string }
 export interface RecordOptions {
   alive?: (pid: number) => boolean;
-  /** cwds of running pi processes; undefined when the listing failed (treated as alive). */
-  procs?: () => string[] | undefined;
+  /** cwds of running pi processes; undefined when the listing failed (treated as alive). May be async. */
+  procs?: () => string[] | undefined | Promise<string[] | undefined>;
   now?: () => Date;
 }
 interface Self { cwd: string; pid: number }
+interface Ctx { t: Target; self: Self; opts: RecordOptions; probed?: { cwds: string[] | undefined } }
 
 const ID = /^(?:[A-Z][A-Z0-9]*[a-z]?|[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)+)$/;
 export const validLaneId = (id: string): boolean => id.length <= 32 && ID.test(id);
@@ -39,30 +40,39 @@ function safeDirs(t: Target): boolean {
   const state = join(t.dir, '..');
   return regularDir(state) !== false && regularDir(t.dir) !== false;
 }
-type Existing = { kind: 'none' | 'unsafe' | 'invalid' } | { kind: 'record'; record: LaunchRecord };
-function readExisting(path: string): Existing {
+type Existing = { kind: 'none' | 'unsafe' | 'invalid' | 'unreadable' } | { kind: 'record'; record: LaunchRecord };
+const absent = (e: any): boolean => e.code === 'ENOENT';
+function readText(path: string): string | Existing {
   try {
     if (!lstatSync(path).isFile()) return { kind: 'unsafe' };
-    const value = JSON.parse(readFileSync(path, 'utf8'));
+    return readFileSync(path, 'utf8');
+  } catch (e: any) { return { kind: absent(e) ? 'none' : 'unreadable' }; } // Only ENOENT means absent.
+}
+function readExisting(path: string): Existing {
+  const text = readText(path);
+  if (typeof text !== 'string') return text;
+  try {
+    const value = JSON.parse(text);
     return validRecord(value) ? { kind: 'record', record: value } : { kind: 'invalid' };
-  } catch (e: any) { return { kind: e.code === 'ENOENT' ? 'none' : 'invalid' }; }
+  } catch { return { kind: 'invalid' }; }
 }
 const sameDir = (a: string, b: string): boolean => real(a) === real(b);
-function piRunsIn(cwd: string, opts: RecordOptions): boolean {
-  const cwds = (opts.procs || piCwds)();
-  return cwds === undefined || cwds.some(c => sameDir(c, cwd));
+const piRunsIn = (cwd: string, cwds: string[] | undefined): boolean => cwds === undefined || cwds.some(c => sameDir(c, cwd));
+type Liveness = 'live' | 'dead' | 'probe';
+function liveness(record: LaunchRecord, ctx: Ctx): Liveness {
+  if (record.retiredAt || !(ctx.opts.alive || pidAlive)(record.pid)) return 'dead';
+  if (sameDir(record.cwd, ctx.self.cwd)) return 'live'; // Same cwd: we are a pi there, so the holder is plausibly live.
+  if (!ctx.probed) return 'probe';
+  return piRunsIn(record.cwd, ctx.probed.cwds) ? 'live' : 'dead';
 }
-function otherIsLive(record: LaunchRecord, cwd: string, opts: RecordOptions): boolean {
-  if (record.retiredAt || !(opts.alive || pidAlive)(record.pid)) return false;
-  return sameDir(record.cwd, cwd) || piRunsIn(record.cwd, opts); // Same cwd: we are a pi there, so the holder is plausibly live.
-}
-type Verdict = 'write' | 'ours' | 'skip';
-function decide(t: Target, self: Self, opts: RecordOptions): Verdict {
-  const existing = readExisting(t.path);
-  if (existing.kind === 'unsafe') return 'skip';
-  if (existing.kind !== 'record' || existing.record.retiredAt) return 'write';
-  if (existing.record.pid === self.pid) return 'ours';
-  return otherIsLive(existing.record, self.cwd, opts) ? 'skip' : 'write';
+type Verdict = { kind: 'write' | 'skip' | 'probe' } | { kind: 'ours'; startedAt: string };
+const OTHER: Record<Liveness, Verdict> = { live: { kind: 'skip' }, dead: { kind: 'write' }, probe: { kind: 'probe' } };
+function decide(ctx: Ctx): Verdict {
+  const existing = readExisting(ctx.t.path);
+  if (existing.kind === 'unsafe' || existing.kind === 'unreadable') return { kind: 'skip' };
+  if (existing.kind !== 'record' || existing.record.retiredAt) return { kind: 'write' };
+  if (existing.record.pid === ctx.self.pid) return { kind: 'ours', startedAt: existing.record.startedAt };
+  return OTHER[liveness(existing.record, ctx)];
 }
 function atomicWrite(t: Target, content: string, guard: () => boolean = () => true): boolean {
   mkdirSync(t.dir, { recursive: true });
@@ -81,23 +91,39 @@ function targetFor(env: NodeJS.ProcessEnv): Target | undefined {
   const dir = join(resolve(lanes), '.state', 'roster');
   return { id, dir, path: join(dir, `${id}.json`) };
 }
-/** Write this process's record; returns ownership, or undefined when nothing was (or may be) written. */
-export function writeLaunchRecord(env: NodeJS.ProcessEnv, cwd: string, pid: number, opts: RecordOptions = {}): Owned | undefined {
-  const t = targetFor(env), self = { cwd, pid };
-  if (!t || !safeDirs(t)) return undefined;
-  const verdict = decide(t, self, opts);
-  if (verdict === 'skip') return undefined;
-  if (verdict === 'ours') return { ...t, pid };
-  const record: LaunchRecord = { id: t.id, pid, cwd, startedAt: stamp(opts) };
-  const recheck = () => safeDirs(t) && decide(t, self, opts) !== 'skip';
-  return atomicWrite(t, line(record), recheck) ? { ...t, pid } : undefined;
+const proceeds = (v: Verdict): boolean => v.kind === 'write' || v.kind === 'ours';
+async function probe(opts: RecordOptions): Promise<string[] | undefined> {
+  try { return await (opts.procs || piCwds)(); } catch { return undefined; } // Failure means "treat as live".
 }
-const stillOurs = (r: LaunchRecord, o: Owned): boolean => r.pid === o.pid && r.id === o.id && !r.retiredAt;
-/** Set retiredAt, but only on a record that is still ours and not yet retired. */
+function commit(ctx: Ctx): Owned | undefined {
+  const { t, self, opts } = ctx;
+  if (!safeDirs(t)) return undefined;
+  const verdict = decide(ctx);
+  if (!proceeds(verdict)) return undefined;
+  if (verdict.kind === 'ours') return { ...t, pid: self.pid, startedAt: verdict.startedAt };
+  const record: LaunchRecord = { id: t.id, pid: self.pid, cwd: self.cwd, startedAt: stamp(opts) };
+  const recheck = () => safeDirs(t) && proceeds(decide(ctx));
+  return atomicWrite(t, line(record), recheck) ? { ...t, pid: self.pid, startedAt: record.startedAt } : undefined;
+}
+async function probeThenCommit(ctx: Ctx): Promise<Owned | undefined> {
+  ctx.probed = { cwds: await probe(ctx.opts) }; // At most once; the pre-rename recheck reuses it.
+  return commit(ctx);
+}
+/**
+ * Write this process's record. Returns ownership (or undefined) synchronously, except when a live
+ * holder of another pid sits in a different cwd: then the process probe runs asynchronously.
+ */
+export function writeLaunchRecord(env: NodeJS.ProcessEnv, cwd: string, pid: number, opts: RecordOptions = {}): Owned | undefined | Promise<Owned | undefined> {
+  const t = targetFor(env);
+  if (!t || !safeDirs(t)) return undefined;
+  const ctx: Ctx = { t, self: { cwd, pid }, opts };
+  return decide(ctx).kind === 'probe' ? probeThenCommit(ctx) : commit(ctx);
+}
+const stillOurs = (r: LaunchRecord, o: Owned): boolean => r.pid === o.pid && r.id === o.id && r.startedAt === o.startedAt && !r.retiredAt;
+/** Set retiredAt, but only on a record that is still ours (id, pid and startedAt) and not yet retired. */
 export function retireLaunchRecord(owned: Owned, opts: RecordOptions = {}): boolean {
   if (!safeDirs(owned)) return false;
   const existing = readExisting(owned.path);
-  if (existing.kind !== 'record') return false;
-  const { record } = existing;
-  return stillOurs(record, owned) && atomicWrite(owned, line({ ...record, retiredAt: stamp(opts) }));
+  if (existing.kind !== 'record' || !stillOurs(existing.record, owned)) return false;
+  return atomicWrite(owned, line({ ...existing.record, retiredAt: stamp(opts) }));
 }
