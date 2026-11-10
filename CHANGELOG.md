@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+- A launch-record process check that finishes after the session restarts no longer updates or retires the new session's launch record. (#6)
+
 ## 0.3.0
 
 ### Added
