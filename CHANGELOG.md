@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+- Write the lanes launch record (`<LANES_DIR>/.state/roster/<PI_ORCH_ID>.json`) when a UI session starts with both `PI_ORCH_ID` and `LANES_DIR` set, and set `retiredAt` on shutdown, so `lanes who` attributes the session. A live record of another process, symlinked state directories and invalid ids are left untouched; `PI_ORCH_OPTOUT=1` also skips it.
+
 ## 0.2.0
 
 ### Changed

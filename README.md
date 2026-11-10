@@ -114,6 +114,16 @@ create/merge/ready/close, gh release, gh workflow run, and orch cand push/land/r
 listed push/pr-create/pr-merge operations. Everyone must use orch_status instead
 of gh run watch / gh pr checks --watch. CLI push/land/rebuild enforce the same role/hold checks using verified wrapper/registered ancestry before considering env. A lane cannot change its own authority by setting PI_ORCH_ID=L0, changing wrapper env, opting out, or calling enrol/unenrol. Standalone/unassigned callers retain operator access. gh api writes remain advisory/unparsed; this is not credential isolation. The role note is sent once per session/role revision, never each turn or in workers.
 
+## Lanes launch record
+
+When `PI_ORCH_ID` and `LANES_DIR` are both set, a UI session writes
+`<LANES_DIR>/.state/roster/<PI_ORCH_ID>.json` (`{id,pid,cwd,startedAt}`, the format of
+pi-setup `lanes register`) so `lanes who` can attribute it, and sets `retiredAt` on
+shutdown. It is written whether or not the cwd is under a configured root. Nothing is
+written for invalid ids, `PI_ORCH_OPTOUT=1`, or in-process workers; a live record held by
+another pid, and symlinked `.state`/`roster` directories or record files, are never
+changed. Dead, retired or malformed records are replaced.
+
 ## ORCH_HOME
 
 `config.json` controls discovery and optional temporary phase admission:
