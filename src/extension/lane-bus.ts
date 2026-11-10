@@ -172,16 +172,23 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
   }
   let launchRecord: Owned | undefined;
   let pendingLaunch: Promise<void> | undefined;
+  let launchGeneration = 0;
   function writeLaunch(cwd: string) {
-    if (pendingLaunch) return; // The process probe is still running for this process.
+    const generation = ++launchGeneration;
+    const isCurrent = () => generation === launchGeneration;
+    launchRecord = undefined; pendingLaunch = undefined;
     try {
-      const written = writeLaunchRecord(env, cwd, pid, options.lanes);
+      const written = writeLaunchRecord(env, cwd, pid, options.lanes, isCurrent);
       if (!(written instanceof Promise)) { launchRecord = written; return; }
-      pendingLaunch = written.then(owned => { launchRecord = owned; }, () => { launchRecord = undefined; }).finally(() => { pendingLaunch = undefined; });
+      pendingLaunch = written.then(owned => { if (isCurrent()) launchRecord = owned; }, () => { if (isCurrent()) launchRecord = undefined; }).finally(() => { if (isCurrent()) pendingLaunch = undefined; });
     } catch { launchRecord = undefined; }
   }
   function retireNow() { try { if (launchRecord) retireLaunchRecord(launchRecord, options.lanes); } catch { /* Best effort. */ } launchRecord = undefined; }
-  function retireLaunch() { if (pendingLaunch) void pendingLaunch.then(retireNow); else retireNow(); }
+  function retireLaunch() {
+    const generation = launchGeneration;
+    const retire = () => { if (generation === launchGeneration) retireNow(); };
+    if (pendingLaunch) void pendingLaunch.then(retire); else retire();
+  }
   pi.on('session_start', (_event, ctx) => {
     if (ctx.hasUI === false) return; // In-process workers must not stop/re-pin their parent's UI session.
     stop(); if (primary) removeHeartbeat(); primary = false;

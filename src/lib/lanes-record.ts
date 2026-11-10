@@ -105,19 +105,20 @@ function commit(ctx: Ctx): Owned | undefined {
   const recheck = () => safeDirs(t) && proceeds(decide(ctx));
   return atomicWrite(t, line(record), recheck) ? { ...t, pid: self.pid, startedAt: record.startedAt } : undefined;
 }
-async function probeThenCommit(ctx: Ctx): Promise<Owned | undefined> {
+async function probeThenCommit(ctx: Ctx, isCurrent: () => boolean): Promise<Owned | undefined> {
   ctx.probed = { cwds: await probe(ctx.opts) }; // At most once; the pre-rename recheck reuses it.
-  return commit(ctx);
+  return isCurrent() ? commit(ctx) : undefined;
 }
 /**
  * Write this process's record. Returns ownership (or undefined) synchronously, except when a live
  * holder of another pid sits in a different cwd: then the process probe runs asynchronously.
+ * isCurrent lets a caller discard an obsolete probe before it can write.
  */
-export function writeLaunchRecord(env: NodeJS.ProcessEnv, cwd: string, pid: number, opts: RecordOptions = {}): Owned | undefined | Promise<Owned | undefined> {
+export function writeLaunchRecord(env: NodeJS.ProcessEnv, cwd: string, pid: number, opts: RecordOptions = {}, isCurrent: () => boolean = () => true): Owned | undefined | Promise<Owned | undefined> {
   const t = targetFor(env);
   if (!t || !safeDirs(t)) return undefined;
   const ctx: Ctx = { t, self: { cwd, pid }, opts };
-  return decide(ctx).kind === 'probe' ? probeThenCommit(ctx) : commit(ctx);
+  return decide(ctx).kind === 'probe' ? probeThenCommit(ctx, isCurrent) : commit(ctx);
 }
 const stillOurs = (r: LaunchRecord, o: Owned): boolean => r.pid === o.pid && r.id === o.id && r.startedAt === o.startedAt && !r.retiredAt;
 /** Set retiredAt, but only on a record that is still ours (id, pid and startedAt) and not yet retired. */
