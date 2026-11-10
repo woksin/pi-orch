@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import laneBus, { handoffActive } from '../src/extension/lane-bus.ts';
@@ -404,4 +404,29 @@ test('quiet stable-key maintenance obeys process identity and parking fallback p
   const c = busFixture({ root, id: 'L1', inboxDir: inbox });
   try { await c.start(); const next = putMessage(c, 'info'); c.tick(); assert.equal(c.sent.length, 0); assert.ok(c.emit('before_agent_start').message.content.includes(next.id)); }
   finally { c.stop(); }
+});
+
+test('launch record is written for PI_ORCH_ID outside configured roots and retired on shutdown', async () => {
+  const lanesDir = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-bus-')), outside = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-outside-'));
+  const f = busFixture({ id: 'L1', lanesDir, lanes: { alive: () => false } });
+  await f.start('main', true, outside);
+  const file = join(lanesDir, '.state/roster/L1.json');
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(record.pid, process.pid); assert.equal(record.cwd, outside); assert.equal(record.retiredAt, undefined);
+  await f.start('main', true, outside); // Re-fired session_start keeps the same record.
+  assert.equal(readFileSync(file, 'utf8'), `${JSON.stringify(record)}\n`);
+  f.emit('session_shutdown', {}, f.context('main', false, outside));
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).retiredAt, undefined); // In-process workers do not retire.
+  f.stop();
+  assert.ok(JSON.parse(readFileSync(file, 'utf8')).retiredAt);
+});
+
+test('in-process workers and unset LANES_DIR write no launch record', async () => {
+  const lanesDir = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-bus-'));
+  const worker = busFixture({ id: 'L1', lanesDir });
+  await worker.start('w', false);
+  assert.equal(existsSync(join(lanesDir, '.state')), false);
+  const unset = busFixture({ id: 'L1' });
+  await unset.start();
+  assert.equal(existsSync(join(lanesDir, '.state')), false);
 });

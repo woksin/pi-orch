@@ -12,6 +12,8 @@ import { sameBinding } from '../lib/identity.ts';
 import type { Binding } from '../lib/identity.ts';
 import type { Identity } from '../lib/discovery.ts';
 import { status } from '../lib/status.ts';
+import { retireLaunchRecord, writeLaunchRecord } from '../lib/lanes-record.ts';
+import type { Owned, RecordOptions } from '../lib/lanes-record.ts';
 
 const string = { type: 'string', minLength: 1 };
 const result = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }], details: data });
@@ -31,6 +33,7 @@ export interface BusOptions {
   interval?: (fn: () => void, ms: number) => Resource;
   clear?: (timer: Resource) => void;
   watch?: (path: string, fn: () => void) => Resource;
+  lanes?: RecordOptions;
 }
 interface Entry { box: string; message: Message }
 export default function laneBus(pi: ExtensionAPI) { return createLaneBus(pi); }
@@ -167,10 +170,14 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     const hb = readJson<any>(path, {});
     if (hb.pid === pid && hb.sessionId === sessionId && existsSync(path)) unlinkSync(path);
   }
+  let launchRecord: Owned | undefined;
+  function writeLaunch(cwd: string) { try { launchRecord = writeLaunchRecord(env, cwd, pid, options.lanes); } catch { launchRecord = undefined; } }
+  function retireLaunch() { try { if (launchRecord) retireLaunchRecord(launchRecord, options.lanes); } catch { /* Best effort. */ } launchRecord = undefined; }
   pi.on('session_start', (_event, ctx) => {
     if (ctx.hasUI === false) return; // In-process workers must not stop/re-pin their parent's UI session.
     stop(); if (primary) removeHeartbeat(); primary = false;
     context = ctx; sessionId = ctx.sessionManager.getSessionId(); notifyConfig(ctx);
+    writeLaunch(ctx.cwd); // Before the roots gate: a lane need not live under a configured root.
     if (!active(store, ctx.cwd, env)) return;
     primary = true; state = 'idle'; lastTurnEndAt = null; promptIdentity = ''; startedAt = now();
     info = cachedInfo.get(ctx.cwd) || { cwd: canonical(ctx.cwd) };
@@ -205,7 +212,7 @@ export function createLaneBus(pi: ExtensionAPI, options: BusOptions = {}) {
     };
     if (options.defer) options.defer(fill); else setImmediate(() => { void fill(); });
   });
-  pi.on('session_shutdown', (_event, ctx) => { if (ctx?.hasUI === false) return; stop(); if (primary) removeHeartbeat(); primary = false; });
+  pi.on('session_shutdown', (_event, ctx) => { if (ctx?.hasUI === false) return; stop(); if (primary) removeHeartbeat(); primary = false; retireLaunch(); });
   pi.on('agent_start', (_event, ctx) => { if (isPrimary(ctx)) { state = 'working'; heartbeat(); } });
   pi.on('agent_end', (_event, ctx) => { if (isPrimary(ctx)) { state = 'idle'; lastTurnEndAt = new Date(clock()).toISOString(); heartbeat(); safelyScan(); } });
   pi.on('before_agent_start', (_event, ctx) => {
