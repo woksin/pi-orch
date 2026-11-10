@@ -431,6 +431,35 @@ test('in-process workers and unset LANES_DIR write no launch record', async () =
   assert.equal(existsSync(join(lanesDir, '.state')), false);
 });
 
+test('launch-record probes and shutdown retirement cannot cross session-start generations', async () => {
+  for (const oldFirst of [true, false]) {
+    const lanesDir = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-bus-'));
+    const file = join(lanesDir, '.state/roster/L1.json');
+    const previous = `${JSON.stringify({ id: 'L1', pid: 4242, cwd: '/nowhere', startedAt: '2020-01-01T00:00:00.000Z' })}\n`;
+    mkdirSync(join(lanesDir, '.state/roster'), { recursive: true }); writeFileSync(file, previous);
+    const releases: ((cwds: string[]) => void)[] = [];
+    const f = busFixture({ id: 'L1', lanesDir, lanes: { alive: () => true, procs: () => new Promise<string[]>(r => { releases.push(r); }) } });
+    try {
+      await f.start('old', true, join(f.root, 'old'));
+      f.stop();
+      await f.start('new');
+      assert.equal(releases.length, 2, 'the new start must issue its own probe');
+      if (oldFirst) {
+        releases[0]([]); await new Promise(r => setImmediate(r));
+        assert.equal(readFileSync(file, 'utf8'), previous, 'an obsolete probe must not write');
+      }
+      releases[1]([]); await new Promise(r => setImmediate(r));
+      const current = readFileSync(file, 'utf8'), record = JSON.parse(current);
+      assert.equal(record.pid, process.pid); assert.equal(record.cwd, f.root); assert.equal(record.retiredAt, undefined);
+      if (!oldFirst) {
+        releases[0]([]); await new Promise(r => setImmediate(r));
+        assert.equal(readFileSync(file, 'utf8'), current, 'old shutdown must not retire the new record');
+      }
+      f.stop(); assert.ok(JSON.parse(readFileSync(file, 'utf8')).retiredAt);
+    } finally { f.stop(); }
+  }
+});
+
 test('a deferred launch-record probe does not block start and is retired if shutdown comes first', async () => {
   const lanesDir = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-lanes-bus-')), cwd = mkdtempSync(join(process.env.AI_WORK_OUTPUT || tmpdir(), 'orch-outside-'));
   const file = join(lanesDir, '.state/roster/L1.json');

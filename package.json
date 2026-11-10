@@ -1,6 +1,6 @@
 {
   "name": "@woksin/pi-orch",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Lean repo-owner orchestration: durable order bus, batched candidate PRs, shared GitHub poller",
   "license": "MIT",
   "author": "woksin",
